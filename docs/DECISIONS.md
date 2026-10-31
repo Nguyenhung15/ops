@@ -323,3 +323,47 @@ Tài liệu này ghi nhận toàn bộ các quyết định kỹ thuật nền t
   - Pagination: Default 20, Max 100.
   - Reason truncation: 100 ký tự.
 
+---
+
+## 15. Thiết kế Nghiệp vụ UC-REC-01: Lễ tân tra cứu người dùng và voucher (User & Voucher Lookup)
+
+- **Vấn đề & Bối cảnh:**
+  1. Lễ tân cần tìm kiếm hồ sơ người dùng theo từ khóa để hỗ trợ đón tiếp, đối soát danh tính hoặc kiểm tra voucher trước khi khám.
+  2. Frontend React/Vite hiện tại đang gọi các API:
+     - `GET /users/search?keyword=...`: Tìm kiếm người dùng theo từ khóa.
+     - `GET /vouchers/user/:userId`: Lấy danh sách voucher của người dùng.
+     - `POST /vouchers/:voucherId/use?userId=...`: Đánh dấu sử dụng voucher tại quầy.
+  3. Cần đảm bảo an toàn thông tin PII, bảo vệ chống brute-force / DDoS tra cứu (Rate Limiting), phòng ngừa ReDoS / SQL-NoSQL injection, và ghi log kiểm toán không làm lộ dữ liệu nhạy cảm.
+
+- **Quy tắc Nghiệp vụ Chi tiết:**
+  1. **Phân quyền (RBAC):**
+     - Chỉ cho phép `ROLES.RECEPTIONIST` và `ROLES.ADMIN`. Các vai trò khác (`Patient`, `Doctor`) bị chặn với HTTP 403 `FORBIDDEN_ROLE`.
+  2. **Quy tắc Từ khóa & Phân trang:**
+     - Từ khóa tìm kiếm (`keyword`): Bắt buộc tối thiểu 3 ký tự. Nếu thiếu, rỗng hoặc < 3 ký tự -> HTTP 400 `INVALID_KEYWORD_LENGTH`.
+     - Chống wildcard injection: Từ khóa chỉ gồm các ký tự đại diện/khoảng trắng (ví dụ `.*`, `*`, `%`, `_`) bị từ chối với HTTP 400 `INVALID_KEYWORD_FORMAT`.
+     - ReDoS Protection: Toàn bộ từ khóa được escape thông qua `escapeRegex()` trước khi đưa vào biểu thức chính quy.
+     - Phân trang: Hỗ trợ `page` (mặc định 1), `limit` (mặc định 10, tối đa 20 bản ghi/trang để chống scraping dữ liệu hàng loạt).
+  3. **Bảo mật & Che giấu Dữ liệu Nhạy cảm (PII Masking):**
+     - Chỉ trả về các trường tối thiểu: `id`, `fullName`, `email` (đã mask), `phone`/`phoneNumber` (đã mask), `role`/`userType`, `isEnabled`/`isEnable`.
+     - Mask Email: Giữ ký tự đầu tiên của username, thay phần còn lại bằng `***` và giữ nguyên domain (ví dụ `nguyenhung@gmail.com` -> `n***@gmail.com`).
+     - Mask Phone: Giữ 2 số đầu, che 4 số giữa bằng `****`, giữ 3 số cuối (ví dụ `0912345678` -> `09****678`).
+     - **Tuyệt đối KHÔNG trả về:** `password`, `passwordHash`, OAuth credentials/tokens, hồ sơ bệnh án/lịch sử y tế.
+  4. **Tra cứu & Sử dụng Voucher của User:**
+     - `GET /vouchers/user/:userId`: Trả về danh sách voucher của user gồm `id`, `code`/`voucherCode`, `name`/`voucherName`, `discountValue`, `type`, `expiryDate`, `issuedAt`, `used`, `usedAt`.
+     - `POST /vouchers/:voucherId/use?userId=...`: Đánh dấu voucher đã dùng (`used = true`, `usedAt = now()`), idempotent nếu gọi lại.
+  5. **Giới hạn tần suất (Rate Limiting):**
+     - Áp dụng rate limiter theo `userId` (hoặc IP nếu chưa auth): Mặc định `RECEPTION_SEARCH_RATE_PER_MIN` = 30 lượt/phút.
+     - Vượt ngưỡng -> HTTP 429 `RATE_LIMIT_EXCEEDED` kèm header `Retry-After`.
+  6. **Kiểm toán (Audit Trail) & Bảo vệ PII trong Log:**
+     - Ghi nhận `AuditLog` với action `SEARCH_USERS`, `VIEW_USER_VOUCHERS`, `USE_VOUCHER`.
+     - Keyword tra cứu KHÔNG được lưu nguyên văn vào log kiểm toán; chỉ lưu mã băm an toàn SHA-256 (`keywordHash`), độ dài từ khóa và số lượng kết quả tìm thấy (`resultCount`).
+
+- **Mặc định đã chọn:**
+  - Route:
+    + `GET /users/search` (phân quyền `RECEPTIONIST`, `ADMIN`, rate limit 30 req/min).
+    + `GET /vouchers/user/:userId` (phân quyền `RECEPTIONIST`, `ADMIN`).
+    + `POST /vouchers/:voucherId/use` (phân quyền `RECEPTIONIST`, `ADMIN`).
+  - Max limit per page: 20.
+  - Min keyword length: 3 ký tự.
+
+

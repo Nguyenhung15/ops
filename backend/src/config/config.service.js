@@ -150,6 +150,10 @@ class ConfigService {
     return this.getString('SHIFT_CANCEL_POLICY', 'BLOCK_UNTIL_RESOLVED');
   }
 
+  get receptionSearchRatePerMin() {
+    return this.getNumber('RECEPTION_SEARCH_RATE_PER_MIN', 30);
+  }
+
   /**
    * Export config snapshot object for backwards compatibility.
    */
@@ -181,6 +185,7 @@ class ConfigService {
       adminBootstrapRequireSecret: this.adminBootstrapRequireSecret,
       checkinEarlyMinutes: this.checkinEarlyMinutes,
       shiftCancelPolicy: this.shiftCancelPolicy,
+      receptionSearchRatePerMin: this.receptionSearchRatePerMin,
     };
   }
 }

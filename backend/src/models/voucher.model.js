@@ -84,6 +84,10 @@ const userVoucherSchema = new mongoose.Schema(
       default: false,
       index: true,
     },
+    usedAt: {
+      type: Date,
+      default: null,
+    },
   },
   {
     timestamps: true,
