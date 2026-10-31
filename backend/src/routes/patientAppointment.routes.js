@@ -37,11 +37,13 @@ router.put(
   },
 );
 
+const RESERVED_APPOINTMENT_SUBPATHS = new Set(['schedule', 'by-date', 'status', 'by-shift']);
+
 router.get(
   '/:id',
   authenticate,
   (req, res, next) => {
-    if (req.user.userType !== ROLES.PATIENT) {
+    if (RESERVED_APPOINTMENT_SUBPATHS.has(req.params.id) || req.user.userType !== ROLES.PATIENT) {
       return next();
     }
     return patientAppointmentController.getAppointmentDetail(req, res, next);

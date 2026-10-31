@@ -267,3 +267,59 @@ Tài liệu này ghi nhận toàn bộ các quyết định kỹ thuật nền t
   - Unique index: `{ eventId: 1, userId: 1 }` trên `event_registrations`.
   - Expiry Policy: Kiểm tra `isEnabled` và `endDate` so với `clock.now()`.
 - **Lý do:** Đáp ứng chính xác giao diện quản lý sự kiện của Lễ tân, bảo toàn RBAC, chống xung đột song song (concurrency-safe), và đảm bảo tính idempotent tuyệt đối khi thao tác nhiều lần.
+
+---
+
+## 14. Thiết kế Nghiệp vụ UC-REC-02: Lễ tân xem lịch vận hành (Receptionist Operational Schedule)
+
+- **Vấn đề & Bối cảnh:**
+  1. Lễ tân và Quản trị viên cần xem toàn bộ lịch vận hành trong ngày hoặc một khoảng ngày nhất định, bao gồm:
+     - Danh sách các ca làm việc của bác sĩ (`DoctorShift`).
+     - Danh sách các lịch hẹn khám (`Appointment`) đã được đặt.
+  2. Frontend React/Vite hiện tại đang gọi các API:
+     - `GET /appointments/by-date?date=YYYY-MM-DD`
+     - `GET /appointments/status/:status?date=YYYY-MM-DD`
+     - `GET /appointments/by-shift/:shiftId`
+     - `GET /shifts/by-date?date=YYYY-MM-DD`
+  3. Cần cung cấp endpoint tổng hợp chuẩn vận hành `GET /appointments/schedule` (trả về cả `appointments` và `shifts` kèm metadata phân trang và bộ lọc) đồng thời giữ tương thích ngược hoàn toàn với các endpoint đơn lẻ mà Frontend đang sử dụng.
+
+- **Quy tắc Nghiệp vụ Chi tiết:**
+  1. **Phân quyền (RBAC):**
+     - Chỉ cho phép `ROLES.RECEPTIONIST` và `ROLES.ADMIN`. Các vai trò khác (`Patient`, `Doctor`) bị chặn với HTTP 403 `FORBIDDEN_ROLE`.
+  2. **Bộ lọc Ngày & Giới hạn Khoảng ngày:**
+     - Cho phép lọc theo ngày cụ thể (`date`) hoặc khoảng ngày (`startDate` và `endDate`).
+     - Ngày giờ được xử lý theo múi giờ phòng khám (`CLINIC_TIMEZONE`, mặc định `Asia/Ho_Chi_Minh`). Nếu không truyền ngày, hệ thống mặc định lấy ngày hôm nay theo `clock.today()`.
+     - **Giới hạn khoảng ngày:** Tối đa 31 ngày. Nếu vượt quá 31 ngày, hệ thống từ chối với HTTP 400 và mã lỗi `DATE_RANGE_EXCEEDED`.
+     - Nếu `startDate > endDate`, trả về HTTP 400 `INVALID_DATE_RANGE`.
+  3. **Bộ lọc Bác sĩ & Trạng thái:**
+     - `doctorId`: Lọc theo bác sĩ phụ trách.
+     - `status`: Lọc theo trạng thái lịch hẹn (`PENDING_CONFIRMATION`, `CONFIRMED`, `CHECKED_IN`, `COMPLETED`, `CANCELLED`... hoặc `ALL`). Hỗ trợ danh sách trạng thái phân cách bằng dấu phẩy.
+  4. **Phân trang & Sắp xếp:**
+     - Phân trang: `page` (mặc định 1), `limit` (mặc định 20, tối đa 100).
+     - Sắp xếp: Luôn sắp xếp theo thứ tự thời gian tăng dần (`appointmentDate ASC, appointmentTime ASC`).
+  5. **Bảo mật & Tối thiểu hóa Dữ liệu Nhạy cảm (Minimal PII):**
+     - Trả về: Tên bệnh nhân (`patientName`), giờ khám (`appointmentTime`), bác sĩ (`doctorName`, `doctorId`), chuyên khoa (`specialtyName`, `specialtyId`), ca trực (`shiftId`), hình thức (`type`: `ONLINE`/`OFFLINE`), trạng thái (`status`), lý do rút gọn (`reason` tối đa 100 ký tự).
+     - **TUYỆT ĐỐI KHÔNG TRẢ VỀ:** Đơn thuốc (`prescriptions`), bệnh sử khám (`medical history`, chẩn đoán chi tiết), mật khẩu/mã băm (`password`, `passwordHash`), hay thông tin danh tính nhạy cảm khác.
+  6. **Đánh chỉ mục (Indexing) & Hiệu năng Query:**
+     - Bắt buộc sử dụng compound index trên `appointments`:
+       + `{ doctorId: 1, appointmentDate: 1, status: 1 }`
+       + `{ appointmentDate: 1, appointmentTime: 1 }`
+       + `{ appointmentDate: 1, status: 1 }`
+     - Bắt buộc index trên `doctor_shifts`:
+       + `{ date: 1, startTime: 1 }`
+     - Đã kiểm tra qua MongoDB `explain('executionStats')` để đảm bảo truy vấn sử dụng chỉ mục (`IXSCAN`), tuyệt đối không để xảy ra quét toàn bộ bộ sưu tập (`COLLSCAN`).
+  7. **Phạm vi Phòng khám (`clinicId` Scope):**
+     - **Hiện trạng:** Trong cơ sở dữ liệu hiện tại, các schema `User`, `Appointment`, `DoctorShift` chưa có trường `clinicId` (hệ thống hiện tại hoạt động theo mô hình phòng khám đơn lẻ - single clinic).
+     - **Quyết định:** Bỏ qua bộ lọc theo `clinicId` ở cấp cơ sở dữ liệu để đảm bảo tương thích với cấu trúc schema hiện có; sẵn sàng mở rộng thêm khi hệ thống tiến hành nâng cấp multi-tenancy trong tương lai.
+
+- **Mặc định đã chọn:**
+  - Route tổng hợp: `GET /appointments/schedule` (trả về `{ appointments, shifts, pagination, filter }`).
+  - Route tương thích:
+    + `GET /appointments/by-date`
+    + `GET /appointments/status/:status`
+    + `GET /appointments/by-shift/:shiftId`
+    + `GET /shifts/by-date`
+  - Max date range: 31 ngày (HTTP 400 `DATE_RANGE_EXCEEDED`).
+  - Pagination: Default 20, Max 100.
+  - Reason truncation: 100 ký tự.
+

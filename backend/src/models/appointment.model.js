@@ -144,9 +144,12 @@ const appointmentSchema = new mongoose.Schema(
   },
 );
 
-// P0 Required Baseline Indexes
+// P0 & Operational Schedule Required Indexes
+appointmentSchema.index({ appointmentDate: 1, appointmentTime: 1 });
+appointmentSchema.index({ appointmentDate: 1, status: 1 });
 appointmentSchema.index({ patientId: 1, appointmentDate: 1 });
 appointmentSchema.index({ doctorId: 1, appointmentDate: 1, status: 1 });
+appointmentSchema.index({ doctorId: 1, appointmentDate: 1 });
 appointmentSchema.index({ shiftId: 1, slotIds: 1 });
 
 appointmentSchema.plugin(baseSchemaPlugin, {

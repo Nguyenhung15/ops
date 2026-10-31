@@ -90,6 +90,7 @@ const doctorShiftSchema = new mongoose.Schema(
   },
 );
 
+doctorShiftSchema.index({ date: 1, startTime: 1 });
 doctorShiftSchema.index({ doctorId: 1, date: 1, shift: 1 }, { unique: true });
 
 doctorShiftSchema.plugin(baseSchemaPlugin, {

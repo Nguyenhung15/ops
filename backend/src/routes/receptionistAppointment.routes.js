@@ -45,6 +45,45 @@ router.put(
   receptionistAppointmentController.rescheduleAppointment,
 );
 
+const receptionistScheduleController = require('../controllers/receptionistSchedule.controller');
+
+// UC-REC-02: Lễ tân / Admin xem lịch vận hành (Appointments + Shifts)
+// GET /appointments/schedule
+// Allowed roles: RECEPTIONIST, ADMIN
+router.get(
+  '/schedule',
+  authenticate,
+  requireRoles(ROLES.RECEPTIONIST, ROLES.ADMIN),
+  receptionistScheduleController.getOperationalSchedule,
+);
+
+// GET /appointments/by-date?date=YYYY-MM-DD
+// Allowed roles: RECEPTIONIST, ADMIN
+router.get(
+  '/by-date',
+  authenticate,
+  requireRoles(ROLES.RECEPTIONIST, ROLES.ADMIN),
+  receptionistScheduleController.getAppointmentsByDate,
+);
+
+// GET /appointments/status/:status
+// Allowed roles: RECEPTIONIST, ADMIN
+router.get(
+  '/status/:status',
+  authenticate,
+  requireRoles(ROLES.RECEPTIONIST, ROLES.ADMIN),
+  receptionistScheduleController.getAppointmentsByStatus,
+);
+
+// GET /appointments/by-shift/:shiftId
+// Allowed roles: RECEPTIONIST, ADMIN
+router.get(
+  '/by-shift/:shiftId',
+  authenticate,
+  requireRoles(ROLES.RECEPTIONIST, ROLES.ADMIN),
+  receptionistScheduleController.getAppointmentsByShift,
+);
+
 module.exports = router;
 
 
