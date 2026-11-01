@@ -24,7 +24,7 @@ const getMyUpcomingAppointments = async (req, res) => {
 };
 
 const getMyCompletedAppointments = async (req, res) => {
-  const result = await patientAppointmentService.getMyCompletedAppointments(req.user);
+  const result = await patientAppointmentService.getMyCompletedAppointments(req.user, req.query);
   return sendSuccess(res, {
     statusCode: 200,
     message: 'Lấy danh sách lịch sử lịch hẹn thành công',

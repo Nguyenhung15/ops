@@ -533,6 +533,8 @@ function serializePatientAppointment(
     specialtyId: appointment.specialtyId,
     specialtyName,
     shiftId: appointment.shiftId,
+    actualStartTime: appointment.actualStartTime || null,
+    actualEndTime: appointment.actualEndTime || null,
     reason: appointment.reason || undefined,
     type: appointment.type || 'OFFLINE',
     patients: (appointment.patients || []).map((p) => ({
@@ -616,17 +618,28 @@ async function getMyUpcomingAppointments(user) {
  * Statuses: COMPLETED.
  * Ordered by appointmentDate DESC, appointmentTime DESC.
  */
-async function getMyCompletedAppointments(user) {
+async function getMyCompletedAppointments(user, query = {}) {
   if (!user || user.userType !== ROLES.PATIENT) {
     throw new ApiError(403, 'Chỉ bệnh nhân mới có quyền truy cập');
   }
 
   const completedStatuses = [APPOINTMENT_STATUSES.COMPLETED];
-
-  const appointments = await Appointment.find({
+  const filter = {
     patientId: user.id,
     status: { $in: completedStatuses },
-  })
+  };
+
+  const { fromDate, toDate, startDate, endDate } = query || {};
+  const from = fromDate || startDate;
+  const to = toDate || endDate;
+
+  if (from || to) {
+    filter.appointmentDate = {};
+    if (from) filter.appointmentDate.$gte = String(from).trim();
+    if (to) filter.appointmentDate.$lte = String(to).trim();
+  }
+
+  const appointments = await Appointment.find(filter)
     .sort({ appointmentDate: -1, appointmentTime: -1, id: -1 })
     .lean();
 
