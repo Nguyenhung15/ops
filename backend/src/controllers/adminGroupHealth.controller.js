@@ -133,6 +133,71 @@ async function reviewAssignmentResult(req, res) {
   });
 }
 
+async function approveRequest(req, res) {
+  const data = await adminGroupHealthService.approveRequest(
+    req.user,
+    req.params.requestId,
+    req.body || {},
+    req,
+  );
+  return sendSuccess(res, {
+    message: 'Duyệt yêu cầu khám nhóm thành công',
+    data,
+  });
+}
+
+async function rejectRequest(req, res) {
+  const data = await adminGroupHealthService.rejectRequest(
+    req.user,
+    req.params.requestId,
+    req.body || {},
+    req,
+  );
+  return sendSuccess(res, {
+    message: 'Từ chối yêu cầu khám nhóm thành công',
+    data,
+  });
+}
+
+async function assignRequest(req, res) {
+  const data = await adminGroupHealthService.assignRequest(
+    req.user,
+    req.params.requestId,
+    req.body || {},
+    req,
+  );
+  return sendSuccess(res, {
+    statusCode: 201,
+    message: 'Phân công khám nhóm thành công',
+    data,
+  });
+}
+
+async function updateAssignment(req, res) {
+  const data = await adminGroupHealthService.updateAssignment(
+    req.user,
+    req.params.assignmentId,
+    req.body || {},
+    req,
+  );
+  return sendSuccess(res, {
+    message: 'Cập nhật phân công khám nhóm thành công',
+    data,
+  });
+}
+
+async function deleteAssignment(req, res) {
+  const data = await adminGroupHealthService.deleteAssignment(
+    req.user,
+    req.params.assignmentId,
+    req,
+  );
+  return sendSuccess(res, {
+    message: data.message,
+    data,
+  });
+}
+
 module.exports = {
   listRequests,
   getRequestDetail,
@@ -144,5 +209,11 @@ module.exports = {
   approveAssignmentResult,
   rejectAssignmentResult,
   reviewAssignmentResult,
+  approveRequest,
+  rejectRequest,
+  assignRequest,
+  updateAssignment,
+  deleteAssignment,
 };
+
 

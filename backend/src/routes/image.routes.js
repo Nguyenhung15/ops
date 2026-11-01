@@ -6,7 +6,9 @@ const { ROLES } = require('../constants/enums');
 
 const router = Router();
 const doctorUpload = createImageUploader('doctors');
+const specialtyUpload = createImageUploader('specialties');
 
+// Doctor image routes
 router.get('/doctor/:doctorId', imageController.getDoctorImage);
 router.post(
   '/doctor/:doctorId',
@@ -27,6 +29,29 @@ router.delete(
   authenticate,
   authorize(ROLES.ADMIN),
   imageController.deleteDoctorImage,
+);
+
+// Specialty image routes
+router.get('/specialty/:specialtyId', imageController.getSpecialtyImage);
+router.post(
+  '/specialty/:specialtyId',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  specialtyUpload.single('file'),
+  imageController.uploadSpecialtyImage,
+);
+router.put(
+  '/specialty/:specialtyId',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  specialtyUpload.single('file'),
+  imageController.updateSpecialtyImage,
+);
+router.delete(
+  '/specialty/:specialtyId',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  imageController.deleteSpecialtyImage,
 );
 
 module.exports = router;

@@ -31,10 +31,44 @@ const deleteDoctorImage = async (req, res) => {
   return res.status(200).json({ success: true, message: 'Xóa ảnh bác sĩ thành công' });
 };
 
+const getSpecialtyImage = async (req, res) => {
+  const image = await imageService.getSpecialtyImage(req.params.specialtyId);
+  return res.status(200).json(image);
+};
+
+const uploadSpecialtyImage = async (req, res) => {
+  const image = await imageService.saveSpecialtyImage(
+    req.user,
+    req.params.specialtyId,
+    req.file,
+    req,
+  );
+  return res.status(201).json(image);
+};
+
+const updateSpecialtyImage = async (req, res) => {
+  const image = await imageService.saveSpecialtyImage(
+    req.user,
+    req.params.specialtyId,
+    req.file,
+    req,
+  );
+  return res.status(200).json(image);
+};
+
+const deleteSpecialtyImage = async (req, res) => {
+  await imageService.deleteSpecialtyImage(req.user, req.params.specialtyId, req);
+  return res.status(200).json({ success: true, message: 'Xóa ảnh chuyên khoa thành công' });
+};
+
 module.exports = {
   getDoctorImage,
   uploadDoctorImage,
   updateDoctorImage,
   deleteDoctorImage,
+  getSpecialtyImage,
+  uploadSpecialtyImage,
+  updateSpecialtyImage,
+  deleteSpecialtyImage,
 };
 

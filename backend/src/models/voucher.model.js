@@ -1,5 +1,7 @@
 const mongoose = require('mongoose');
 const baseSchemaPlugin = require('./plugins/baseSchema.plugin');
+const { VOUCHER_TYPE_VALUES, VOUCHER_TYPES } = require('../constants/enums');
+const UserVoucher = require('./userVoucher.model');
 
 const voucherSchema = new mongoose.Schema(
   {
@@ -7,7 +9,9 @@ const voucherSchema = new mongoose.Schema(
       type: String,
       required: true,
       unique: true,
+      uppercase: true,
       trim: true,
+      index: true,
     },
     name: {
       type: String,
@@ -25,8 +29,9 @@ const voucherSchema = new mongoose.Schema(
     },
     type: {
       type: String,
-      enum: ['SERVICE_TICKET', 'DISCOUNT'],
-      default: 'SERVICE_TICKET',
+      enum: VOUCHER_TYPE_VALUES,
+      default: VOUCHER_TYPES.SERVICE_TICKET,
+      required: true,
     },
     enable: {
       type: Boolean,
@@ -43,77 +48,27 @@ const voucherSchema = new mongoose.Schema(
   },
 );
 
-voucherSchema.plugin(baseSchemaPlugin, {
-  sequenceName: 'vouchers',
+voucherSchema.virtual('isEnabled').get(function () {
+  return this.enable;
 });
 
-const userVoucherSchema = new mongoose.Schema(
-  {
-    voucherId: {
-      type: Number,
-      required: true,
-      index: true,
-    },
-    userId: {
-      type: Number,
-      required: true,
-      index: true,
-    },
-    voucherCode: {
-      type: String,
-      default: null,
-    },
-    voucherName: {
-      type: String,
-      default: null,
-    },
-    discountValue: {
-      type: Number,
-      default: null,
-    },
-    type: {
-      type: String,
-      enum: ['SERVICE_TICKET', 'DISCOUNT'],
-      default: 'SERVICE_TICKET',
-    },
-    expiryDate: {
-      type: Date,
-      default: null,
-    },
-    issuedAt: {
-      type: Date,
-      default: Date.now,
-    },
-    used: {
-      type: Boolean,
-      default: false,
-      index: true,
-    },
-    usedAt: {
-      type: Date,
-      default: null,
-    },
-    appointmentId: {
-      type: Number,
-      default: null,
-      index: true,
-    },
-  },
-  {
-    timestamps: true,
-  },
-);
+voucherSchema.virtual('isEnabled').set(function (val) {
+  this.enable = Boolean(val);
+});
 
-userVoucherSchema.index({ voucherId: 1, userId: 1 });
-
-userVoucherSchema.plugin(baseSchemaPlugin, {
-  sequenceName: 'user_vouchers',
+voucherSchema.plugin(baseSchemaPlugin, {
+  sequenceName: 'vouchers',
+  extraTransform: (_doc, ret) => {
+    if (ret.expiryDate instanceof Date) {
+      ret.expiryDate = ret.expiryDate.toISOString();
+    }
+    return ret;
+  },
 });
 
 const Voucher = mongoose.model('Voucher', voucherSchema, 'vouchers');
-const UserVoucher = mongoose.model('UserVoucher', userVoucherSchema, 'user_vouchers');
 
-module.exports = {
-  Voucher,
-  UserVoucher,
-};
+Voucher.Voucher = Voucher;
+Voucher.UserVoucher = UserVoucher;
+
+module.exports = Voucher;

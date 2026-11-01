@@ -3,7 +3,7 @@ const bcrypt = require('bcryptjs');
 const env = require('../config/env');
 const { User, BootstrapState } = require('../models');
 const { ROLES, AUTH_PROVIDERS, AUDIT_ACTIONS } = require('../constants/enums');
-const { normalizeEmail, normalizeGender } = require('../utils/normalizers');
+const { normalizeEmail, normalizePhoneNumber, normalizeGender } = require('../utils/normalizers');
 const { recordAudit } = require('./audit.service');
 const ApiError = require('../utils/ApiError');
 
@@ -317,9 +317,7 @@ function validateAdminRegistrationInput(payload = {}) {
     throw new ApiError(400, 'Mật khẩu phải có ít nhất 6 ký tự');
   }
 
-  const phoneNumber = payload?.phoneNumber
-    ? String(payload.phoneNumber).trim()
-    : null;
+  const phoneNumber = normalizePhoneNumber(payload?.phoneNumber);
   const gender = normalizeGender(payload?.gender);
 
   return { fullName, email, password, phoneNumber, gender };

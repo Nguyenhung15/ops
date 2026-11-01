@@ -123,6 +123,7 @@ export default function AdminVouchers() {
   );
 
   const openCreateModal = () => {
+    setError("");
     setEditingId(null);
     setForm({ ...emptyForm });
     setShowForm(true);
@@ -257,7 +258,7 @@ export default function AdminVouchers() {
         </Col>
       </Row>
 
-      {error && (
+      {!showForm && error && (
         <Alert variant="danger" onClose={() => setError("")} dismissible>
           {error}
         </Alert>
@@ -334,6 +335,11 @@ export default function AdminVouchers() {
             <Modal.Title>{editingId ? "Chỉnh sửa voucher" : "Tạo voucher"}</Modal.Title>
           </Modal.Header>
           <Modal.Body className="d-grid gap-3">
+            {error && (
+              <Alert variant="danger" onClose={() => setError("")} dismissible className="mb-0">
+                {error}
+              </Alert>
+            )}
             <Form.Group controlId="voucherCode">
               <Form.Label>Mã voucher</Form.Label>
               <Form.Control

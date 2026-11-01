@@ -22,6 +22,9 @@ const rssNewsRoutes = require('./rssNews.routes');
 const patientProfileRoutes = require('./patientProfile.routes');
 const receptionistEventRoutes = require('./receptionistEvent.routes');
 const voucherRoutes = require('./voucher.routes');
+const eventRoutes = require('./event.routes');
+const receptionRoutes = require('./reception.routes');
+const feedbackRoutes = require('./feedback.routes');
 
 const router = Router();
 
@@ -67,5 +70,8 @@ router.use('/group-health', doctorGroupHealthRoutes);
 router.use('/rss-sources', rssNewsRoutes);
 router.use('/patients-info', patientProfileRoutes);
 router.use('/vouchers', voucherRoutes);
+router.use('/events', eventRoutes);
+router.use('/reception', receptionRoutes);
+router.use('/feedbacks', feedbackRoutes);
 
 module.exports = router;

@@ -159,6 +159,50 @@ const setUserStatus = async (req, res) => {
   });
 };
 
+const deleteStaff = async (req, res) => {
+  const result = await userService.deleteStaff(req.user, req.params.id, {
+    req,
+  });
+  return sendSuccess(res, {
+    message: result.message,
+    data: result,
+  });
+};
+
+const deleteDoctor = async (req, res) => {
+  const result = await userService.deleteStaff(req.user, req.params.id, {
+    expectedRole: ROLES.DOCTOR,
+    req,
+  });
+  return sendSuccess(res, {
+    message: result.message,
+    data: result,
+  });
+};
+
+const deleteReceptionist = async (req, res) => {
+  const result = await userService.deleteStaff(req.user, req.params.id, {
+    expectedRole: ROLES.RECEPTIONIST,
+    req,
+  });
+  return sendSuccess(res, {
+    message: result.message,
+    data: result,
+  });
+};
+
+const deleteOrLockUser = async (req, res) => {
+  const isHardDelete = req.query?.hard === 'true' || req.query?.permanent === 'true';
+  if (isHardDelete) {
+    const result = await userService.deleteStaff(req.user, req.params.userId, { req });
+    return sendSuccess(res, {
+      message: result.message,
+      data: result,
+    });
+  }
+  return lockUser(req, res);
+};
+
 const listAuditLogs = async (req, res) => {
   const logs = await auditService.queryAuditLogs({
     targetType: req.query.targetType,
@@ -185,6 +229,10 @@ module.exports = {
   updateDoctor,
   lockUser,
   unlockUser,
+  deleteOrLockUser,
+  deleteStaff,
+  deleteDoctor,
+  deleteReceptionist,
   setUserStatus,
   listAuditLogs,
 };

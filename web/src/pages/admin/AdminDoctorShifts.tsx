@@ -12,6 +12,15 @@ const slotLabel: Record<typeof slotOrder[number], string> = {
   EVENING: "Evening (18:00 - 21:00)",
 };
 
+function parseLocalDate(dateStr: string) {
+  if (!dateStr) return new Date();
+  const parts = dateStr.split("-").map(Number);
+  if (parts.length === 3 && !parts.some(Number.isNaN)) {
+    return new Date(parts[0], parts[1] - 1, parts[2]);
+  }
+  return new Date(dateStr);
+}
+
 function getISOWeekStart(date = new Date()) {
   const d = new Date(date);
   const day = d.getDay();
@@ -21,7 +30,10 @@ function getISOWeekStart(date = new Date()) {
   return d;
 }
 function toISO(date: Date) {
-  return date.toISOString().slice(0, 10);
+  const y = date.getFullYear();
+  const m = String(date.getMonth() + 1).padStart(2, "0");
+  const d = String(date.getDate()).padStart(2, "0");
+  return `${y}-${m}-${d}`;
 }
 function formatDM(date: Date) {
   const dd = String(date.getDate()).padStart(2, "0");
@@ -41,7 +53,7 @@ export default function AdminDoctorShifts() {
     fetchSpecialties().then(setSpecialties).catch(() => {});
   }, []);
 
-  const monday = useMemo(() => getISOWeekStart(new Date(dateStr)), [dateStr]);
+  const monday = useMemo(() => getISOWeekStart(parseLocalDate(dateStr)), [dateStr]);
   const headers = useMemo(() => {
     const list: { iso: string; label: string }[] = [];
     for (let i = 0; i < 7; i++) {

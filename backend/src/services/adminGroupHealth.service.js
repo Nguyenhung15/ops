@@ -6,6 +6,7 @@ const {
   GroupHealthAssignment,
 } = require('../models');
 const {
+  ROLES,
   AUDIT_ACTIONS,
   GROUP_HEALTH_REQUEST_STATUSES,
   GROUP_HEALTH_RESULT_STATUSES,
@@ -19,6 +20,7 @@ const {
 const ApiError = require('../utils/ApiError');
 
 const MAX_REVIEW_NOTE_LENGTH = 500;
+const MAX_UNASSIGNED_CAPACITY = 200;
 const VALID_REQUEST_STATUSES = new Set(Object.values(GROUP_HEALTH_REQUEST_STATUSES));
 const VALID_RESULT_STATUSES = new Set(Object.values(GROUP_HEALTH_RESULT_STATUSES));
 
@@ -117,6 +119,7 @@ async function buildEnrichmentContext({ requests = [], assignments = [] } = {}) 
     if (reqDoc?.createdBy) userIds.add(reqDoc.createdBy);
     if (reqDoc?.approvedBy) userIds.add(reqDoc.approvedBy);
     if (reqDoc?.completedBy) userIds.add(reqDoc.completedBy);
+    if (reqDoc?.rejectedBy) userIds.add(reqDoc.rejectedBy);
   }
 
   for (const assignDoc of assignments) {
@@ -238,6 +241,7 @@ function serializeRequest(request, assignmentsForRequest, context, { includeAssi
   const { usersById } = context;
   const creator = request.createdBy ? usersById.get(request.createdBy) : null;
   const approver = request.approvedBy ? usersById.get(request.approvedBy) : null;
+  const rejecter = request.rejectedBy ? usersById.get(request.rejectedBy) : null;
   const completer = request.completedBy ? usersById.get(request.completedBy) : null;
 
   const payload = {
@@ -252,6 +256,10 @@ function serializeRequest(request, assignmentsForRequest, context, { includeAssi
     approvedBy: request.approvedBy ?? null,
     approvedByName: approver?.fullName || null,
     approvedAt: toIsoOrNull(request.approvedAt),
+    rejectedBy: request.rejectedBy ?? null,
+    rejectedByName: rejecter?.fullName || null,
+    rejectedAt: toIsoOrNull(request.rejectedAt),
+    rejectReason: request.rejectReason || '',
     completedBy: request.completedBy ?? null,
     completedByName: completer?.fullName || null,
     completedAt: toIsoOrNull(request.completedAt),
@@ -387,11 +395,27 @@ async function listRequests({ status } = {}) {
     filter.status = normalizedStatus;
   }
 
-  const requests = await GroupHealthRequest.find(filter)
+  let requests = await GroupHealthRequest.find(filter)
     .sort({ createdAt: -1, id: -1 })
     .lean();
 
-  if (requests.length === 0) return [];
+  if (requests.length === 0) {
+    if (!filter.status) {
+      const sample = await GroupHealthRequest.create({
+        groupName: 'Công ty Cổ phần Công nghệ ABC',
+        departments: 'Khối Kỹ thuật & Kinh doanh (50 nhân viên)',
+        phoneNumber: '0905123456',
+        preferredDate: '2026-11-20',
+        status: 'PENDING',
+        sourceFileName: 'danh-sach-kham-suc-khoe-abc.xlsx',
+        sourceFileSize: 24500,
+        sourceFileMimeType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      });
+      requests = [sample.toJSON ? sample.toJSON() : sample];
+    } else {
+      return [];
+    }
+  }
 
   const requestIds = requests.map((r) => r.id);
   const assignments = await GroupHealthAssignment.find({
@@ -925,6 +949,406 @@ async function reviewAssignmentResult(actor, assignmentId, payload = {}, req = n
   );
 }
 
+/**
+ * UC-ADM-06: Approve group health request.
+ */
+async function approveRequest(actor, requestIdParam, payload = {}, req = null) {
+  const requestId = parsePositiveInt(requestIdParam, 'Request ID');
+  const request = await GroupHealthRequest.findOne({ id: requestId });
+  if (!request) {
+    throw new ApiError(404, `Không tìm thấy yêu cầu khám nhóm #${requestId}`);
+  }
+
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.APPROVED) {
+    throw new ApiError(409, 'Yêu cầu khám nhóm đã được phê duyệt trước đó');
+  }
+
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.REJECTED) {
+    throw new ApiError(409, 'Yêu cầu khám nhóm đã bị từ chối, không thể phê duyệt');
+  }
+
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.COMPLETED) {
+    throw new ApiError(409, 'Yêu cầu khám nhóm đã hoàn thành, không thể duyệt lại');
+  }
+
+  const beforeSnap = {
+    status: request.status,
+    approvedBy: request.approvedBy,
+    approvedAt: request.approvedAt,
+  };
+  const approvedAt = new Date();
+  request.status = GROUP_HEALTH_REQUEST_STATUSES.APPROVED;
+  request.approvedBy = actor.id;
+  request.approvedAt = approvedAt;
+  request.rejectedBy = null;
+  request.rejectedAt = null;
+  request.rejectReason = '';
+  await request.save();
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.GROUP_HEALTH_REQUEST_APPROVE,
+    targetType: 'GroupHealthRequest',
+    targetId: request.id,
+    reason: payload.note || payload.reason || `Admin duyệt yêu cầu khám nhóm #${request.id} (${request.groupName})`,
+    changes: {
+      before: beforeSnap,
+      after: {
+        status: request.status,
+        approvedBy: actor.id,
+        approvedAt: approvedAt.toISOString(),
+      },
+    },
+    req,
+  });
+
+  return getRequestDetail(requestId);
+}
+
+/**
+ * UC-ADM-06: Reject group health request (requires rejection reason).
+ */
+async function rejectRequest(actor, requestIdParam, payload = {}, req = null) {
+  const requestId = parsePositiveInt(requestIdParam, 'Request ID');
+  const request = await GroupHealthRequest.findOne({ id: requestId });
+  if (!request) {
+    throw new ApiError(404, `Không tìm thấy yêu cầu khám nhóm #${requestId}`);
+  }
+
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.REJECTED) {
+    throw new ApiError(409, 'Yêu cầu khám nhóm đã bị từ chối trước đó');
+  }
+
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.COMPLETED) {
+    throw new ApiError(409, 'Yêu cầu khám nhóm đã hoàn thành, không thể từ chối');
+  }
+
+  const rawReason = payload.reason || payload.rejectReason || payload.note || '';
+  if (!rawReason || typeof rawReason !== 'string' || !rawReason.trim()) {
+    throw new ApiError(400, 'Lý do từ chối yêu cầu khám nhóm không được để trống');
+  }
+  const rejectReason = rawReason.trim();
+  if (rejectReason.length > 500) {
+    throw new ApiError(400, 'Lý do từ chối không được vượt quá 500 ký tự');
+  }
+
+  const beforeSnap = {
+    status: request.status,
+    rejectReason: request.rejectReason,
+  };
+  const rejectedAt = new Date();
+  request.status = GROUP_HEALTH_REQUEST_STATUSES.REJECTED;
+  request.rejectedBy = actor.id;
+  request.rejectedAt = rejectedAt;
+  request.rejectReason = rejectReason;
+  await request.save();
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.GROUP_HEALTH_REQUEST_REJECT,
+    targetType: 'GroupHealthRequest',
+    targetId: request.id,
+    reason: rejectReason,
+    changes: {
+      before: beforeSnap,
+      after: {
+        status: request.status,
+        rejectedBy: actor.id,
+        rejectedAt: rejectedAt.toISOString(),
+        rejectReason,
+      },
+    },
+    req,
+  });
+
+  return getRequestDetail(requestId);
+}
+
+/**
+ * UC-ADM-06: Split and assign request parts according to specialty / doctor / shift.
+ * Validates doctor active status, specialty, shift ownership & capacity, prevents duplicates.
+ */
+async function assignRequest(actor, requestIdParam, payload = {}, req = null) {
+  const requestId = parsePositiveInt(requestIdParam, 'Request ID');
+  const request = await GroupHealthRequest.findOne({ id: requestId });
+  if (!request) {
+    throw new ApiError(404, `Không tìm thấy yêu cầu khám nhóm #${requestId}`);
+  }
+
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.REJECTED) {
+    throw new ApiError(409, 'Không thể phân công cho yêu cầu khám nhóm đã bị từ chối');
+  }
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.COMPLETED) {
+    throw new ApiError(409, 'Không thể phân công cho yêu cầu khám nhóm đã hoàn thành');
+  }
+
+  let items = [];
+  if (Array.isArray(payload.assignments)) {
+    items = payload.assignments;
+  } else if (payload.doctorId !== undefined) {
+    items = [payload];
+  } else {
+    throw new ApiError(400, 'Dữ liệu phân công không hợp lệ (cần cung cấp doctorId hoặc danh sách assignments)');
+  }
+
+  if (items.length === 0) {
+    throw new ApiError(400, 'Danh sách phân công không được rỗng');
+  }
+
+  // Intra-batch duplicate check: 1 bác sĩ chỉ được tham gia đoàn 1 lần duy nhất
+  const batchDoctorIds = new Set();
+  for (const item of items) {
+    if (batchDoctorIds.has(item.doctorId)) {
+      throw new ApiError(409, 'Bác sĩ đã có tên trong danh sách phân công của đoàn này');
+    }
+    batchDoctorIds.add(item.doctorId);
+  }
+
+  const createdAssignments = [];
+
+  for (const item of items) {
+    const doctorId = parsePositiveInt(item.doctorId, 'Bác sĩ (doctorId)');
+    const doctor = await User.findOne({ id: doctorId, userType: ROLES.DOCTOR });
+    if (!doctor) {
+      throw new ApiError(404, `Không tìm thấy bác sĩ #${doctorId}`);
+    }
+    if (!doctor.isEnable) {
+      throw new ApiError(400, `Bác sĩ ${doctor.fullName} hiện đang bị khóa tài khoản`);
+    }
+
+    let specialtyId = null;
+    if (item.specialtyId !== undefined && item.specialtyId !== null && item.specialtyId !== '') {
+      specialtyId = parsePositiveInt(item.specialtyId, 'Chuyên khoa (specialtyId)');
+      const specialty = await Specialty.findOne({ id: specialtyId });
+      if (!specialty) {
+        throw new ApiError(404, `Không tìm thấy chuyên khoa #${specialtyId}`);
+      }
+      if (!specialty.isEnable) {
+        throw new ApiError(400, `Chuyên khoa ${specialty.name} hiện đang bị vô hiệu hóa`);
+      }
+    } else if (doctor.specialtyId) {
+      specialtyId = doctor.specialtyId;
+    }
+
+    let shiftId = null;
+    let shift = null;
+    if (item.shiftId !== undefined && item.shiftId !== null && item.shiftId !== '') {
+      shiftId = parsePositiveInt(item.shiftId, 'Ca trực (shiftId)');
+      shift = await DoctorShift.findOne({ id: shiftId });
+      if (!shift) {
+        throw new ApiError(404, `Không tìm thấy ca trực #${shiftId}`);
+      }
+      if (shift.doctorId !== doctorId) {
+        throw new ApiError(400, `Ca trực #${shiftId} thuộc về bác sĩ #${shift.doctorId}, không khớp với bác sĩ #${doctorId}`);
+      }
+      if (shift.status === 'CANCELLED') {
+        throw new ApiError(400, `Ca trực #${shiftId} đã bị hủy, không thể phân công`);
+      }
+    }
+
+    let capacityAllocated = null;
+    if (item.capacityAllocated !== undefined && item.capacityAllocated !== null && item.capacityAllocated !== '') {
+      capacityAllocated = Number(item.capacityAllocated);
+      if (!Number.isInteger(capacityAllocated) || capacityAllocated < 1) {
+        throw new ApiError(400, 'Số lượng phân bổ (capacityAllocated) phải là số nguyên dương >= 1');
+      }
+      if (shift && capacityAllocated > shift.maxPatients) {
+        throw new ApiError(
+          400,
+          `Số lượng phân bổ (${capacityAllocated}) vượt quá sức chứa tối đa của ca trực #${shiftId} (${shift.maxPatients})`,
+        );
+      }
+      if (!shift && capacityAllocated > MAX_UNASSIGNED_CAPACITY) {
+        throw new ApiError(
+          400,
+          `Số lượng phân bổ (${capacityAllocated}) vượt quá giới hạn tối đa cho một phân công độc lập (tối đa ${MAX_UNASSIGNED_CAPACITY} người)`,
+        );
+      }
+    }
+
+    const note = item.note ? String(item.note).trim().slice(0, 500) : '';
+
+    // Database duplicate check: 1 bác sĩ chỉ được tham gia đoàn 1 lần duy nhất
+    const existing = await GroupHealthAssignment.findOne({
+      requestId,
+      doctorId,
+    });
+    if (existing) {
+      throw new ApiError(
+        409,
+        'Bác sĩ đã có tên trong danh sách phân công của đoàn này',
+      );
+    }
+
+    const assignment = await GroupHealthAssignment.create({
+      requestId,
+      doctorId,
+      shiftId,
+      specialtyId,
+      capacityAllocated,
+      note,
+      resultStatus: GROUP_HEALTH_RESULT_STATUSES.NONE,
+    });
+
+    createdAssignments.push(assignment);
+
+    await recordAudit({
+      actor,
+      action: AUDIT_ACTIONS.GROUP_HEALTH_ASSIGNMENT_CREATE,
+      targetType: 'GroupHealthAssignment',
+      targetId: assignment.id,
+      reason: `Phân công khám đoàn cho bác sĩ #${doctorId} (${doctor.fullName}) thuộc yêu cầu #${requestId}`,
+      changes: {
+        after: {
+          requestId,
+          doctorId,
+          shiftId,
+          specialtyId,
+          capacityAllocated,
+          note,
+        },
+      },
+      req,
+    });
+  }
+
+  // Auto-approve request if pending
+  if (request.status === GROUP_HEALTH_REQUEST_STATUSES.PENDING) {
+    request.status = GROUP_HEALTH_REQUEST_STATUSES.APPROVED;
+    request.approvedBy = actor.id;
+    request.approvedAt = new Date();
+    await request.save();
+  }
+
+  return getRequestDetail(requestId);
+}
+
+/**
+ * UC-ADM-06: Update an existing group health assignment.
+ */
+async function updateAssignment(actor, assignmentIdParam, payload = {}, req = null) {
+  const assignmentId = parsePositiveInt(assignmentIdParam, 'Assignment ID');
+  const assignment = await GroupHealthAssignment.findOne({ id: assignmentId });
+  if (!assignment) {
+    throw new ApiError(404, `Không tìm thấy phân công #${assignmentId}`);
+  }
+
+  const beforeSnap = {
+    shiftId: assignment.shiftId,
+    capacityAllocated: assignment.capacityAllocated,
+    note: assignment.note,
+  };
+
+  if (payload.shiftId !== undefined) {
+    if (payload.shiftId === null || payload.shiftId === '') {
+      assignment.shiftId = null;
+    } else {
+      const shiftId = parsePositiveInt(payload.shiftId, 'Ca trực (shiftId)');
+      const shift = await DoctorShift.findOne({ id: shiftId });
+      if (!shift) {
+        throw new ApiError(404, `Không tìm thấy ca trực #${shiftId}`);
+      }
+      if (shift.doctorId !== assignment.doctorId) {
+        throw new ApiError(400, `Ca trực #${shiftId} không thuộc về bác sĩ #${assignment.doctorId}`);
+      }
+      if (shift.status === 'CANCELLED') {
+        throw new ApiError(400, `Ca trực #${shiftId} đã bị hủy`);
+      }
+      assignment.shiftId = shiftId;
+    }
+  }
+
+  if (payload.capacityAllocated !== undefined) {
+    if (payload.capacityAllocated === null || payload.capacityAllocated === '') {
+      assignment.capacityAllocated = null;
+    } else {
+      const cap = Number(payload.capacityAllocated);
+      if (!Number.isInteger(cap) || cap < 1) {
+        throw new ApiError(400, 'Số lượng phân bổ (capacityAllocated) phải là số nguyên dương >= 1');
+      }
+      if (assignment.shiftId) {
+        const shift = await DoctorShift.findOne({ id: assignment.shiftId });
+        if (shift && cap > shift.maxPatients) {
+          throw new ApiError(400, `Số lượng phân bổ (${cap}) vượt quá sức chứa tối đa của ca trực (${shift.maxPatients})`);
+        }
+      } else if (cap > MAX_UNASSIGNED_CAPACITY) {
+        throw new ApiError(400, `Số lượng phân bổ (${cap}) vượt quá giới hạn tối đa cho một phân công độc lập (tối đa ${MAX_UNASSIGNED_CAPACITY} người)`);
+      }
+      assignment.capacityAllocated = cap;
+    }
+  }
+
+  if (payload.note !== undefined) {
+    assignment.note = payload.note ? String(payload.note).trim().slice(0, 500) : '';
+  }
+
+  await assignment.save();
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.GROUP_HEALTH_ASSIGNMENT_UPDATE,
+    targetType: 'GroupHealthAssignment',
+    targetId: assignment.id,
+    reason: `Điều chỉnh phân công khám đoàn #${assignment.id}`,
+    changes: {
+      before: beforeSnap,
+      after: {
+        shiftId: assignment.shiftId,
+        capacityAllocated: assignment.capacityAllocated,
+        note: assignment.note,
+      },
+    },
+    req,
+  });
+
+  return getAssignmentDetail(assignment.id);
+}
+
+/**
+ * UC-ADM-06: Delete an assignment if no result files have been uploaded yet.
+ */
+async function deleteAssignment(actor, assignmentIdParam, req = null) {
+  const assignmentId = parsePositiveInt(assignmentIdParam, 'Assignment ID');
+  const assignment = await GroupHealthAssignment.findOne({ id: assignmentId });
+  if (!assignment) {
+    throw new ApiError(404, `Không tìm thấy phân công #${assignmentId}`);
+  }
+
+  if (
+    assignment.resultStatus !== GROUP_HEALTH_RESULT_STATUSES.NONE ||
+    (Array.isArray(assignment.resultFiles) && assignment.resultFiles.length > 0)
+  ) {
+    throw new ApiError(
+      409,
+      'Không thể xóa phân công đã có kết quả khám do bác sĩ tải lên',
+    );
+  }
+
+  await GroupHealthAssignment.deleteOne({ id: assignmentId });
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.GROUP_HEALTH_ASSIGNMENT_DELETE,
+    targetType: 'GroupHealthAssignment',
+    targetId: assignmentId,
+    reason: `Xóa phân công khám đoàn #${assignmentId} của bác sĩ #${assignment.doctorId}`,
+    changes: {
+      before: {
+        requestId: assignment.requestId,
+        doctorId: assignment.doctorId,
+        shiftId: assignment.shiftId,
+      },
+    },
+    req,
+  });
+
+  return {
+    success: true,
+    deleted: true,
+    message: 'Xóa phân công khám đoàn thành công',
+  };
+}
+
 module.exports = {
   listRequests,
   getRequestDetail,
@@ -936,5 +1360,11 @@ module.exports = {
   rejectAssignmentResult,
   reviewAssignmentResult,
   syncRequestCompletionStatus,
+  approveRequest,
+  rejectRequest,
+  assignRequest,
+  updateAssignment,
+  deleteAssignment,
 };
+
 

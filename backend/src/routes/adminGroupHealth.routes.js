@@ -16,6 +16,21 @@ router.get(
   adminGroupHealthController.openRequestSourceFile,
 );
 
+// UC-ADM-06: Approve / Reject group health request
+router.post('/requests/:requestId/approve', adminGroupHealthController.approveRequest);
+router.put('/requests/:requestId/approve', adminGroupHealthController.approveRequest);
+router.post('/requests/:requestId/reject', adminGroupHealthController.rejectRequest);
+router.put('/requests/:requestId/reject', adminGroupHealthController.rejectRequest);
+
+// UC-ADM-06: Split and assign request parts according to specialty / doctor / shift
+router.post('/requests/:requestId/assign', adminGroupHealthController.assignRequest);
+router.post('/requests/:requestId/assignments', adminGroupHealthController.assignRequest);
+router.post('/requests/:requestId/split', adminGroupHealthController.assignRequest);
+
+// UC-ADM-06: Adjust / Delete assignments
+router.put('/assignments/:assignmentId', adminGroupHealthController.updateAssignment);
+router.delete('/assignments/:assignmentId', adminGroupHealthController.deleteAssignment);
+
 // Group Health Assignments inspection & result/source file opening
 router.get('/assignments', adminGroupHealthController.listAssignments);
 router.get(

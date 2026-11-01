@@ -132,6 +132,7 @@ export default function AdminEvents() {
   );
 
   const openCreateModal = () => {
+    setError("");
     setEditing(null);
     setForm({ ...emptyForm });
     setShowForm(true);
@@ -241,7 +242,7 @@ export default function AdminEvents() {
         </Col>
       </Row>
 
-      {error && (
+      {!showForm && error && (
         <Alert variant="danger" onClose={() => setError("")} dismissible>
           {error}
         </Alert>
@@ -333,6 +334,11 @@ export default function AdminEvents() {
             <Modal.Title>{editing ? "Chỉnh sửa sự kiện" : "Tạo sự kiện"}</Modal.Title>
           </Modal.Header>
           <Modal.Body className="d-grid gap-3">
+            {error && (
+              <Alert variant="danger" onClose={() => setError("")} dismissible className="mb-0">
+                {error}
+              </Alert>
+            )}
             <Form.Group controlId="eventTitle">
               <Form.Label>Tiêu đề</Form.Label>
               <Form.Control

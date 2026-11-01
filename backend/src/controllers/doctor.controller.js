@@ -27,9 +27,21 @@ const searchDoctors = async (req, res) => {
   return sendSuccess(res, { data: doctors });
 };
 
+const deleteDoctor = async (req, res) => {
+  const result = await userService.deleteStaff(req.user, req.params.id, {
+    expectedRole: ROLES.DOCTOR,
+    req,
+  });
+  return sendSuccess(res, {
+    message: result.message,
+    data: result,
+  });
+};
+
 module.exports = {
   getDoctorsBySpecialty,
   getDoctorById,
   searchDoctors,
+  deleteDoctor,
 };
 

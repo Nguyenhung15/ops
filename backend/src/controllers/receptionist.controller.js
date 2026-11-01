@@ -28,9 +28,21 @@ const updateReceptionist = async (req, res) => {
   });
 };
 
+const deleteReceptionist = async (req, res) => {
+  const result = await userService.deleteStaff(req.user, req.params.id, {
+    expectedRole: ROLES.RECEPTIONIST,
+    req,
+  });
+  return sendSuccess(res, {
+    message: result.message,
+    data: result,
+  });
+};
+
 module.exports = {
   getAllReceptionists,
   getReceptionistById,
   updateReceptionist,
+  deleteReceptionist,
 };
 

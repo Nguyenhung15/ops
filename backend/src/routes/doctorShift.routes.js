@@ -1,20 +1,20 @@
 const { Router } = require('express');
-const { createShift, getMyShifts } = require('../controllers/doctorShift.controller');
+const doctorShiftController = require('../controllers/doctorShift.controller');
 const shiftCancellationController = require('../controllers/shiftCancellation.controller');
 const { authenticate, requireRoles, authorize } = require('../middlewares/auth.middleware');
 const { ROLES } = require('../constants/enums');
 
 const router = Router();
 
-// =========================================================================
-// RECEPTIONIST & ADMIN: Shift Cancellation Requests Management (UC-REC-06)
-// =========================================================================
+// ==========================================
+// 1. Receptionist & Admin: Shift Cancellation Requests Management (UC-REC-06)
+// ==========================================
 
 // GET /shifts/cancellation-requests/pending - Danh sách yêu cầu chờ duyệt kèm tổng hợp
 router.get(
   '/cancellation-requests/pending',
   authenticate,
-  requireRoles(ROLES.RECEPTIONIST, ROLES.ADMIN),
+  authorize(ROLES.RECEPTIONIST, ROLES.ADMIN),
   shiftCancellationController.getPending,
 );
 
@@ -22,7 +22,7 @@ router.get(
 router.put(
   '/cancellation-requests/:id/approve',
   authenticate,
-  requireRoles(ROLES.RECEPTIONIST, ROLES.ADMIN),
+  authorize(ROLES.RECEPTIONIST, ROLES.ADMIN),
   shiftCancellationController.approve,
 );
 
@@ -30,18 +30,109 @@ router.put(
 router.put(
   '/cancellation-requests/:id/reject',
   authenticate,
-  requireRoles(ROLES.RECEPTIONIST, ROLES.ADMIN),
+  authorize(ROLES.RECEPTIONIST, ROLES.ADMIN),
   shiftCancellationController.reject,
 );
 
-// =========================================================================
-// DOCTOR: Shift Cancellation Requests & Shift Management
-// =========================================================================
-router.use(authenticate, authorize(ROLES.DOCTOR));
+router.get(
+  '/by-date',
+  authenticate,
+  authorize(ROLES.ADMIN, ROLES.RECEPTIONIST),
+  doctorShiftController.getAllShiftsByDate,
+);
 
-router.post('/create', createShift);
-router.get('/my', getMyShifts);
-router.get('/cancellation-requests/my', shiftCancellationController.getMine);
-router.post('/:shiftId/cancellation-requests', shiftCancellationController.create);
+// ==========================================
+// 2. Admin routes
+// ==========================================
+router.get(
+  '/admin/week',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  doctorShiftController.getShiftsInWeek,
+);
+
+router.post(
+  '/admin/create',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  doctorShiftController.createShift,
+);
+
+router.get(
+  '/admin/:id',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  doctorShiftController.getShiftDetail,
+);
+
+router.put(
+  '/admin/:id',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  doctorShiftController.adjustShift,
+);
+
+router.delete(
+  '/admin/:id',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  doctorShiftController.deleteShift,
+);
+
+// ==========================================
+// 3. Doctor routes
+// ==========================================
+router.get(
+  '/my',
+  authenticate,
+  authorize(ROLES.DOCTOR),
+  doctorShiftController.getMyShifts,
+);
+
+router.get(
+  '/cancellation-requests/my',
+  authenticate,
+  authorize(ROLES.DOCTOR),
+  shiftCancellationController.getMine,
+);
+
+router.post(
+  '/:shiftId/cancellation-requests',
+  authenticate,
+  authorize(ROLES.DOCTOR),
+  shiftCancellationController.create,
+);
+
+// ==========================================
+// 4. Common / Dual-role routes (Admin & Doctor)
+// ==========================================
+router.post(
+  '/create',
+  authenticate,
+  authorize(ROLES.ADMIN, ROLES.DOCTOR),
+  doctorShiftController.createShift,
+);
+
+router.get(
+  '/:id',
+  authenticate,
+  authorize(ROLES.ADMIN, ROLES.DOCTOR, ROLES.RECEPTIONIST),
+  doctorShiftController.getShiftDetail,
+);
+
+router.put(
+  '/:id',
+  authenticate,
+  authorize(ROLES.ADMIN, ROLES.DOCTOR),
+  doctorShiftController.adjustShift,
+);
+
+router.delete(
+  '/:id',
+  authenticate,
+  authorize(ROLES.ADMIN),
+  doctorShiftController.deleteShift,
+);
 
 module.exports = router;
+

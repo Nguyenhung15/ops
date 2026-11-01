@@ -2,6 +2,7 @@ const bcrypt = require('bcryptjs');
 const ApiError = require('../utils/ApiError');
 const {
   normalizeEmail,
+  normalizePhoneNumber,
   normalizeGender,
   normalizeRole,
   parsePositiveInt,
@@ -20,6 +21,9 @@ const {
   Appointment,
   Prescription,
   PaymentTransaction,
+  GroupHealthAssignment,
+  ShiftCancellationRequest,
+  Image,
 } = require('../models');
 const { resolveSpecialty } = require('./specialty.service');
 const { BCRYPT_ROUNDS, validatePasswordStrength } = require('./auth.service');
@@ -281,11 +285,16 @@ async function createUser(actor, payload, req) {
   const userData = {
     fullName,
     email,
-    phoneNumber: payload?.phoneNumber ? String(payload.phoneNumber).trim() : null,
+    phoneNumber: normalizePhoneNumber(payload?.phoneNumber),
     password: await bcrypt.hash(payload.password, BCRYPT_ROUNDS),
     gender: normalizeGender(payload?.gender),
     userType,
-    isEnable: payload?.isEnable !== undefined ? Boolean(payload.isEnable) : true,
+    isEnable:
+      payload?.isEnable !== undefined
+        ? Boolean(payload.isEnable)
+        : payload?.isEnabled !== undefined
+        ? Boolean(payload.isEnabled)
+        : true,
     authProvider: AUTH_PROVIDERS.LOCAL,
   };
 
@@ -298,10 +307,16 @@ async function createUser(actor, payload, req) {
     userData.degree = payload?.degree ? String(payload.degree).trim() : null;
     userData.description = payload?.description ? String(payload.description).trim() : null;
     userData.experience = payload?.experience ? String(payload.experience).trim() : null;
-    userData.consultationFee =
-      payload?.consultationFee !== undefined && payload?.consultationFee !== null
-        ? Number(payload.consultationFee)
-        : null;
+    
+    let consultationFee = null;
+    if (payload?.consultationFee !== undefined && payload?.consultationFee !== null && payload?.consultationFee !== '') {
+      const feeNum = Number(payload.consultationFee);
+      if (Number.isNaN(feeNum) || feeNum < 0) {
+        throw new ApiError(400, 'Phí khám (consultationFee) phải là số không âm (>= 0)');
+      }
+      consultationFee = feeNum;
+    }
+    userData.consultationFee = consultationFee;
     userData.isVip = Boolean(payload?.isVip);
   }
 
@@ -373,7 +388,7 @@ async function updateUser(actor, targetId, payload, { expectedCurrentRole = null
   }
 
   if (payload?.phoneNumber !== undefined) {
-    user.phoneNumber = payload.phoneNumber ? String(payload.phoneNumber).trim() : null;
+    user.phoneNumber = normalizePhoneNumber(payload.phoneNumber);
   }
 
   if (payload?.gender !== undefined) {
@@ -383,6 +398,31 @@ async function updateUser(actor, targetId, payload, { expectedCurrentRole = null
   if (payload?.password !== undefined && payload.password !== '') {
     validatePasswordStrength(payload.password);
     user.password = await bcrypt.hash(payload.password, BCRYPT_ROUNDS);
+  }
+
+  // Handle status update (isEnable / isEnabled)
+  if (payload?.isEnable !== undefined || payload?.isEnabled !== undefined) {
+    const nextStatus =
+      payload.isEnable !== undefined ? Boolean(payload.isEnable) : Boolean(payload.isEnabled);
+    if (nextStatus !== user.isEnable) {
+      if (!nextStatus) {
+        await ensureNotLastActiveAdmin(user, 'khóa');
+        user.isEnable = false;
+        user.disabledAt = new Date();
+        user.disabledBy = actor.id;
+        user.disabledReason =
+          typeof payload?.disabledReason === 'string' && payload.disabledReason.trim()
+            ? payload.disabledReason.trim()
+            : typeof payload?.reason === 'string' && payload.reason.trim()
+            ? payload.reason.trim()
+            : 'Vô hiệu hóa tài khoản qua cập nhật hồ sơ';
+      } else {
+        user.isEnable = true;
+        user.disabledAt = null;
+        user.disabledBy = null;
+        user.disabledReason = null;
+      }
+    }
   }
 
   // Handle Doctor-specific fields
@@ -397,6 +437,9 @@ async function updateUser(actor, targetId, payload, { expectedCurrentRole = null
         specialtyId: payload?.specialtyId ?? user.specialtyId,
         specialization: payload?.specialization,
       });
+      // UC-ADM-02: Updating doctor's specialty affects future scheduling.
+      // Existing Appointment records preserve their immutable `appointment.specialtyId`
+      // so past medical & appointment histories remain 100% intact.
       user.specialtyId = specialty.id;
     }
 
@@ -410,10 +453,15 @@ async function updateUser(actor, targetId, payload, { expectedCurrentRole = null
       user.experience = payload.experience ? String(payload.experience).trim() : null;
     }
     if (payload?.consultationFee !== undefined) {
-      user.consultationFee =
-        payload.consultationFee !== null && payload.consultationFee !== ''
-          ? Number(payload.consultationFee)
-          : null;
+      if (payload.consultationFee === null || payload.consultationFee === '') {
+        user.consultationFee = null;
+      } else {
+        const feeNum = Number(payload.consultationFee);
+        if (Number.isNaN(feeNum) || feeNum < 0) {
+          throw new ApiError(400, 'Phí khám (consultationFee) phải là số không âm (>= 0)');
+        }
+        user.consultationFee = feeNum;
+      }
     }
     if (payload?.isVip !== undefined) {
       user.isVip = Boolean(payload.isVip);
@@ -568,7 +616,7 @@ async function updateOwnProfile(actor, payload, req) {
     user.fullName = trimmed;
   }
   if (payload?.phoneNumber !== undefined) {
-    user.phoneNumber = payload.phoneNumber ? String(payload.phoneNumber).trim() : null;
+    user.phoneNumber = normalizePhoneNumber(payload.phoneNumber);
   }
   if (payload?.gender !== undefined) {
     user.gender = normalizeGender(payload.gender);
@@ -614,6 +662,118 @@ async function searchUsers(keyword = '') {
   }));
 }
 
+/**
+ * UC-ADM-02: Delete staff (Doctor / Receptionist).
+ * Exception / Hard constraint: NEVER delete staff with existing history
+ * (shifts, appointments, prescriptions, group health assignments, cancellation requests).
+ */
+async function deleteStaff(actor, targetId, { expectedRole = null, req = null } = {}) {
+  if (!actor || actor.userType !== ROLES.ADMIN) {
+    throw new ApiError(403, 'Chỉ Quản trị viên (Admin) mới có quyền xóa nhân sự');
+  }
+
+  const numericId = parsePositiveInt(targetId, 'staffId');
+  const user = await User.findOne({ id: numericId });
+  if (!user) {
+    const label = expectedRole || 'nhân sự';
+    throw new ApiError(404, `Không tìm thấy ${label} với ID #${numericId}`);
+  }
+
+  if (expectedRole && user.userType !== expectedRole) {
+    throw new ApiError(
+      400,
+      `Tài khoản #${numericId} không phải vai trò '${expectedRole}' (hiện tại: '${user.userType}')`,
+    );
+  }
+
+  if (![ROLES.DOCTOR, ROLES.RECEPTIONIST].includes(user.userType)) {
+    throw new ApiError(
+      400,
+      `Chỉ có thể xóa nhân sự thuộc vai trò Bác sĩ hoặc Lễ tân (tài khoản này là '${user.userType}')`,
+    );
+  }
+
+  if (actor.id === user.id) {
+    throw new ApiError(400, 'Không thể tự xóa tài khoản của chính mình');
+  }
+
+  // Check history across medical and operational records
+  const historyItems = [];
+
+  if (user.userType === ROLES.DOCTOR) {
+    const [shiftsCount, appointmentsCount, assignmentsCount, cancelReqsCount] =
+      await Promise.all([
+        DoctorShift.countDocuments({ doctorId: user.id }),
+        Appointment.countDocuments({ doctorId: user.id }),
+        GroupHealthAssignment
+          ? GroupHealthAssignment.countDocuments({ doctorId: user.id })
+          : 0,
+        ShiftCancellationRequest
+          ? ShiftCancellationRequest.countDocuments({ doctorId: user.id })
+          : 0,
+      ]);
+
+    if (shiftsCount > 0) historyItems.push(`${shiftsCount} ca trực`);
+    if (appointmentsCount > 0) historyItems.push(`${appointmentsCount} lịch hẹn khám`);
+    if (assignmentsCount > 0) historyItems.push(`${assignmentsCount} phân công khám đoàn`);
+    if (cancelReqsCount > 0) historyItems.push(`${cancelReqsCount} yêu cầu hủy ca`);
+
+    if (appointmentsCount > 0) {
+      const aptDocs = await Appointment.find({ doctorId: user.id }, { id: 1, _id: 0 }).lean();
+      const aptIds = aptDocs.map((a) => a.id);
+      if (aptIds.length > 0) {
+        const prescriptionsCount = await Prescription.countDocuments({
+          appointmentId: { $in: aptIds },
+        });
+        if (prescriptionsCount > 0) {
+          historyItems.push(`${prescriptionsCount} đơn thuốc`);
+        }
+      }
+    }
+  } else if (user.userType === ROLES.RECEPTIONIST) {
+    const confirmedCount = await Appointment.countDocuments({ confirmedBy: user.id });
+    if (confirmedCount > 0) {
+      historyItems.push(`đã xác nhận ${confirmedCount} lịch hẹn`);
+    }
+  }
+
+  // Hard constraint: Staff with existing history MUST NOT be deleted
+  if (historyItems.length > 0) {
+    throw new ApiError(
+      409,
+      `Không thể xóa nhân sự #${user.id} (${user.fullName} - ${user.userType}) vì đã có lịch sử hoạt động ` +
+        `(${historyItems.join(', ')}). Vui lòng khóa tài khoản (disable) thay vì xóa để bảo toàn dữ liệu y tế.`,
+    );
+  }
+
+  // Safe deletion: staff has 0 history records
+  const beforeSnap = await enrichSingleUser(user);
+
+  if (Image) {
+    await Image.deleteMany({ doctorId: user.id });
+  }
+
+  await User.deleteOne({ id: user.id });
+
+  await recordAudit({
+    actor,
+    action: AUDIT_ACTIONS.USER_DELETE,
+    targetType: 'User',
+    targetId: user.id,
+    reason: `Xóa nhân sự ${user.userType} chưa có lịch sử hoạt động (#${user.id} - ${user.fullName})`,
+    changes: { before: sanitizeSnapshot(beforeSnap), after: null },
+    req,
+  });
+
+  return {
+    deleted: true,
+    id: user.id,
+    fullName: user.fullName,
+    userType: user.userType,
+    message: `Đã xóa nhân sự #${user.id} (${user.fullName}) thành công`,
+  };
+}
+
 module.exports = {
   enrichUsersWithSpecialty,
   enrichSingleUser,
@@ -625,6 +785,7 @@ module.exports = {
   updateUser,
   lockUser,
   unlockUser,
+  deleteStaff,
   updateOwnProfile,
   searchUsers,
 };

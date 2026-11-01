@@ -7,12 +7,12 @@ const {
   ROLES,
   AUDIT_ACTIONS,
   FEEDBACK_STATUSES,
+  FEEDBACK_STATUS_VALUES,
   APPOINTMENT_STATUSES,
 } = require('../constants/enums');
 const ApiError = require('../utils/ApiError');
-const auditService = require('./audit.service');
-const { configService } = require('../config/config.service');
-const { getClock } = require('./clock.service');
+const { parsePositiveInt } = require('../utils/normalizers');
+const { recordAudit } = require('./audit.service');
 
 /**
  * Sanitize plain text để loại bỏ hoàn toàn các thẻ HTML, script, style nhằm chống XSS.
@@ -40,417 +40,53 @@ function maskName(fullName) {
   return `${parts[0].slice(0, 1)}. ${parts.slice(1).join(' ')}`;
 }
 
+/**
+ * Format feedback document into standard FeedbackItem.
+ */
+function serializeFeedback(doc, authorUser, viewer = null, isAdmin = false) {
+  const f = doc.toJSON ? doc.toJSON() : doc;
+  const author = authorUser || {};
+
+  const viewerId = viewer ? Number(viewer.id || viewer.userId) : null;
+  const isOwner = viewerId ? viewerId === Number(f.userId) : false;
+  const isAnonymous = Boolean(f.isAnonymous);
+
+  const showAuthor = isAdmin || isOwner || !isAnonymous;
+
+  const result = {
+    id: f.id,
+    userId: showAuthor ? f.userId : undefined,
+    appointmentId: f.appointmentId || undefined,
+    doctorId: f.doctorId || undefined,
+    patientName: showAuthor ? (author.fullName || 'Bệnh nhân') : 'Bệnh nhân ẩn danh',
+    patientEmail: showAuthor ? author.email : undefined,
+    rating: f.rating,
+    title: f.title || '',
+    comment: f.comment,
+    category: f.category || 'Khác',
+    isAnonymous,
+    adminResponse: f.adminResponse || undefined,
+    adminRespondedAt: f.adminRespondedAt instanceof Date ? f.adminRespondedAt.toISOString() : (f.adminRespondedAt || undefined),
+    createdAt: f.createdAt instanceof Date ? f.createdAt.toISOString() : (f.createdAt || new Date().toISOString()),
+    updatedAt: f.updatedAt instanceof Date ? f.updatedAt.toISOString() : (f.updatedAt || undefined),
+    isOwner,
+  };
+
+  if (isAdmin) {
+    result.status = f.status;
+    result.adminRespondedBy = f.adminRespondedBy ?? null;
+    result.moderatedBy = f.moderatedBy ?? null;
+    result.moderatedAt = f.moderatedAt instanceof Date ? f.moderatedAt.toISOString() : (f.moderatedAt || null);
+  }
+
+  return result;
+}
+
 class FeedbackService {
-  /**
-   * UC-PAT-12: Patient tạo feedback mới cho lịch hẹn đã hoàn thành (COMPLETED)
-   *
-   * Quy tắc:
-   * 1. appointmentId bắt buộc, thuộc user (sai -> 404).
-   * 2. Lịch phải ở trạng thái COMPLETED (sai -> 409 APPOINTMENT_NOT_COMPLETED).
-   * 3. Mỗi lịch chỉ 1 feedback đang hoạt động (deletedAt == null); trùng -> 409 FEEDBACK_EXISTS.
-   *    (Bản đã xóa mềm deletedAt != null không tính).
-   * 4. doctorId tự động lấy từ appointment (không phụ thuộc client).
-   * 5. rating nguyên từ 1..5 (sai -> 400).
-   * 6. comment bắt buộc, trim tối đa 1000 ký tự, sanitize chống XSS (loại bỏ HTML).
-   * 7. status mặc định: PENDING.
-   * 8. Ghi Audit CREATE_FEEDBACK.
-   */
-  async createFeedback(user, payload = {}, req = null) {
-    if (!user || (user.userType !== ROLES.PATIENT && user.role !== ROLES.PATIENT)) {
-      throw new ApiError(403, 'Chỉ bệnh nhân mới có quyền gửi đánh giá phản hồi', 'FORBIDDEN_ROLE');
-    }
-
-    const userId = Number(user.id || user.userId);
-    if (!Number.isSafeInteger(userId) || userId <= 0) {
-      throw new ApiError(401, 'Thông tin người dùng không hợp lệ', 'INVALID_USER_ID');
-    }
-
-    const { appointmentId, rating, comment, title, category, isAnonymous } = payload;
-
-    // Validate appointmentId
-    const numApptId = Number(appointmentId);
-    if (!Number.isSafeInteger(numApptId) || numApptId <= 0) {
-      throw new ApiError(400, 'appointmentId phải là số nguyên dương hợp lệ', 'INVALID_APPOINTMENT_ID');
-    }
-
-    // Validate rating: nguyên 1..5
-    const numRating = Number(rating);
-    if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
-      throw new ApiError(400, 'rating phải là số nguyên từ 1 đến 5', 'INVALID_RATING');
-    }
-
-    // Validate comment: sanitize chống XSS, tối đa 1000 ký tự
-    const cleanComment = sanitizeComment(comment, 1000);
-    if (!cleanComment) {
-      throw new ApiError(400, 'Nội dung phản hồi (comment) không được để trống', 'EMPTY_COMMENT');
-    }
-
-    // Validate title (tùy chọn)
-    const cleanTitle = title && typeof title === 'string' ? sanitizeComment(title, 255) : null;
-    const cleanCategory = category && typeof category === 'string' ? category.trim().slice(0, 100) : null;
-    const anonymousFlag = Boolean(isAnonymous);
-
-    // Kiểm tra lịch hẹn: Phải thuộc user (hoặc profile phụ thuộc của user) và status COMPLETED
-    const appointment = await Appointment.findOne({ id: numApptId }).lean();
-    if (!appointment) {
-      throw new ApiError(404, 'Không tìm thấy lịch hẹn', 'APPOINTMENT_NOT_FOUND');
-    }
-
-    // Kiểm tra quyền sở hữu lịch hẹn
-    const isOwner = appointment.patientId === userId;
-    if (!isOwner) {
-      // Trường hợp không thuộc user -> 404 để chống enumeration
-      throw new ApiError(404, 'Lịch hẹn không thuộc quyền quản lý của bạn', 'APPOINTMENT_NOT_FOUND');
-    }
-
-    // Kiểm tra trạng thái lịch hẹn: BẮT BUỘC COMPLETED
-    if (appointment.status !== APPOINTMENT_STATUSES.COMPLETED) {
-      throw new ApiError(409, 'Chỉ có thể đánh giá lịch hẹn đã hoàn thành khám', 'APPOINTMENT_NOT_COMPLETED');
-    }
-
-    // Kiểm tra trùng: Mỗi lịch một feedback (bản xóa mềm deletedAt != null không tính)
-    const existingFeedback = await Feedback.findOne({
-      appointmentId: numApptId,
-      userId,
-      deletedAt: null,
-    }).lean();
-
-    if (existingFeedback) {
-      throw new ApiError(409, 'Lịch hẹn này đã có đánh giá phản hồi', 'FEEDBACK_EXISTS');
-    }
-
-    const clock = getClock();
-    const now = clock.now();
-
-    // Tạo feedback mới
-    const createdFeedback = await Feedback.create({
-      userId,
-      appointmentId: numApptId,
-      doctorId: appointment.doctorId || null,
-      rating: numRating,
-      comment: cleanComment,
-      title: cleanTitle,
-      category: cleanCategory,
-      isAnonymous: anonymousFlag,
-      status: FEEDBACK_STATUSES.PENDING,
-      deletedAt: null,
-      createdAt: now,
-      updatedAt: now,
-    });
-
-    // Ghi Audit CREATE_FEEDBACK
-    await auditService.log({
-      actor: {
-        userId,
-        role: user.userType || user.role,
-        email: user.email,
-      },
-      action: AUDIT_ACTIONS.CREATE_FEEDBACK,
-      resource: {
-        type: 'Feedback',
-        id: createdFeedback.id,
-      },
-      reason: `Bệnh nhân #${userId} gửi phản hồi cho lịch hẹn #${numApptId}`,
-      changes: {
-        appointmentId: numApptId,
-        rating: numRating,
-        doctorId: appointment.doctorId,
-      },
-      req,
-    });
-
-    return this.serializeFeedbackItem(createdFeedback, user);
-  }
-
-  /**
-   * UC-PAT-12: Patient xem danh sách feedback của chính mình (GET /feedbacks/my)
-   * Phân trang kèm status, lọc bỏ bản xóa mềm (deletedAt: null).
-   */
-  async getMyFeedbacks(user, query = {}) {
-    if (!user || (user.userType !== ROLES.PATIENT && user.role !== ROLES.PATIENT)) {
-      throw new ApiError(403, 'Chỉ bệnh nhân mới có quyền xem danh sách phản hồi cá nhân', 'FORBIDDEN_ROLE');
-    }
-
-    const userId = Number(user.id || user.userId);
-    const filter = {
-      userId,
-      deletedAt: null,
-    };
-
-    if (query.status && Object.values(FEEDBACK_STATUSES).includes(query.status)) {
-      filter.status = query.status;
-    }
-
-    const page = Math.max(1, Number(query.page) || 1);
-    const limit = Math.min(100, Math.max(1, Number(query.limit) || 20));
-    const skip = (page - 1) * limit;
-
-    const [feedbacks, total] = await Promise.all([
-      Feedback.find(filter)
-        .sort({ createdAt: -1, id: -1 })
-        .skip(skip)
-        .limit(limit)
-        .lean(),
-      Feedback.countDocuments(filter),
-    ]);
-
-    const items = feedbacks.map((fb) => this.serializeFeedbackItem(fb, user));
-
-    return {
-      items,
-      data: items, // tương thích frontend
-      pagination: {
-        page,
-        limit,
-        total,
-        totalPages: Math.ceil(total / limit) || 1,
-      },
-    };
-  }
-
-  /**
-   * UC-PAT-12: Patient cập nhật feedback của mình (PUT /feedbacks/:id)
-   *
-   * Quy tắc:
-   * 1. Chỉ sửa của chính mình trong FEEDBACK_EDIT_DAYS ngày kể từ createdAt (sai -> 409 FEEDBACK_EDIT_WINDOW_CLOSED).
-   * 2. Người khác hoặc không tồn tại -> 404 (chống enumeration).
-   * 3. Sửa bản PUBLISHED thì tự động quay về PENDING để kiểm duyệt lại.
-   * 4. Ghi Audit UPDATE_FEEDBACK.
-   */
-  async updateFeedback(user, feedbackId, payload = {}, req = null) {
-    if (!user || (user.userType !== ROLES.PATIENT && user.role !== ROLES.PATIENT)) {
-      throw new ApiError(403, 'Chỉ bệnh nhân mới có quyền chỉnh sửa phản hồi cá nhân', 'FORBIDDEN_ROLE');
-    }
-
-    const userId = Number(user.id || user.userId);
-    const numFbId = Number(feedbackId);
-    if (!Number.isSafeInteger(numFbId) || numFbId <= 0) {
-      throw new ApiError(400, 'id phản hồi không hợp lệ', 'INVALID_FEEDBACK_ID');
-    }
-
-    const feedback = await Feedback.findOne({
-      id: numFbId,
-      userId,
-      deletedAt: null,
-    });
-
-    if (!feedback) {
-      throw new ApiError(404, 'Không tìm thấy phản hồi hoặc phản hồi không thuộc về bạn', 'FEEDBACK_NOT_FOUND');
-    }
-
-    // Kiểm tra giới hạn ngày sửa (FEEDBACK_EDIT_DAYS)
-    const clock = getClock();
-    const now = clock.now();
-    const editDaysAllowed = configService.feedbackEditDays || 7;
-    const createdAtTime = new Date(feedback.createdAt).getTime();
-    const elapsedDays = (now.getTime() - createdAtTime) / (1000 * 60 * 60 * 24);
-
-    if (elapsedDays > editDaysAllowed) {
-      throw new ApiError(
-        409,
-        `Thời hạn chỉnh sửa phản hồi (${editDaysAllowed} ngày) đã kết thúc`,
-        'FEEDBACK_EDIT_WINDOW_CLOSED',
-      );
-    }
-
-    const updateFields = {};
-
-    // Validate rating nếu có cập nhật
-    if (payload.rating !== undefined) {
-      const numRating = Number(payload.rating);
-      if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
-        throw new ApiError(400, 'rating phải là số nguyên từ 1 đến 5', 'INVALID_RATING');
-      }
-      updateFields.rating = numRating;
-    }
-
-    // Validate comment nếu có cập nhật
-    if (payload.comment !== undefined) {
-      const cleanComment = sanitizeComment(payload.comment, 1000);
-      if (!cleanComment) {
-        throw new ApiError(400, 'Nội dung phản hồi không được để trống', 'EMPTY_COMMENT');
-      }
-      updateFields.comment = cleanComment;
-    }
-
-    if (payload.title !== undefined) {
-      updateFields.title = payload.title ? sanitizeComment(payload.title, 255) : null;
-    }
-    if (payload.category !== undefined) {
-      updateFields.category = payload.category ? String(payload.category).trim().slice(0, 100) : null;
-    }
-    if (payload.isAnonymous !== undefined) {
-      updateFields.isAnonymous = Boolean(payload.isAnonymous);
-    }
-
-    // Nếu sửa bản PUBLISHED thì quay về PENDING
-    if (feedback.status === FEEDBACK_STATUSES.PUBLISHED) {
-      updateFields.status = FEEDBACK_STATUSES.PENDING;
-    }
-
-    updateFields.updatedAt = now;
-
-    Object.assign(feedback, updateFields);
-    await feedback.save();
-
-    // Ghi Audit UPDATE_FEEDBACK
-    await auditService.log({
-      actor: {
-        userId,
-        role: user.userType || user.role,
-        email: user.email,
-      },
-      action: AUDIT_ACTIONS.UPDATE_FEEDBACK,
-      resource: {
-        type: 'Feedback',
-        id: feedback.id,
-      },
-      reason: `Bệnh nhân #${userId} cập nhật phản hồi #${feedback.id}`,
-      changes: {
-        feedbackId: feedback.id,
-        newStatus: feedback.status,
-      },
-      req,
-    });
-
-    return this.serializeFeedbackItem(feedback, user);
-  }
-
-  /**
-   * UC-PAT-12: Patient xóa feedback của mình (DELETE /feedbacks/:id)
-   *
-   * Quy tắc:
-   * 1. Xóa mềm (gán deletedAt = clock.now()).
-   * 2. Chỉ xóa trong FEEDBACK_EDIT_DAYS ngày (quá hạn -> 409 FEEDBACK_EDIT_WINDOW_CLOSED).
-   * 3. Người khác hoặc không tồn tại -> 404 (chống enumeration).
-   * 4. Sau khi xóa mềm, patient có quyền gửi lại feedback mới cho lịch hẹn đó.
-   * 5. Ghi Audit DELETE_FEEDBACK.
-   */
-  async deleteFeedback(user, feedbackId, req = null) {
-    if (!user || (user.userType !== ROLES.PATIENT && user.role !== ROLES.PATIENT)) {
-      throw new ApiError(403, 'Chỉ bệnh nhân mới có quyền xóa phản hồi cá nhân', 'FORBIDDEN_ROLE');
-    }
-
-    const userId = Number(user.id || user.userId);
-    const numFbId = Number(feedbackId);
-    if (!Number.isSafeInteger(numFbId) || numFbId <= 0) {
-      throw new ApiError(400, 'id phản hồi không hợp lệ', 'INVALID_FEEDBACK_ID');
-    }
-
-    const feedback = await Feedback.findOne({
-      id: numFbId,
-      userId,
-      deletedAt: null,
-    });
-
-    if (!feedback) {
-      throw new ApiError(404, 'Không tìm thấy phản hồi hoặc phản hồi không thuộc về bạn', 'FEEDBACK_NOT_FOUND');
-    }
-
-    // Kiểm tra thời hạn xóa
-    const clock = getClock();
-    const now = clock.now();
-    const editDaysAllowed = configService.feedbackEditDays || 7;
-    const createdAtTime = new Date(feedback.createdAt).getTime();
-    const elapsedDays = (now.getTime() - createdAtTime) / (1000 * 60 * 60 * 24);
-
-    if (elapsedDays > editDaysAllowed) {
-      throw new ApiError(
-        409,
-        `Thời hạn xóa phản hồi (${editDaysAllowed} ngày) đã kết thúc`,
-        'FEEDBACK_EDIT_WINDOW_CLOSED',
-      );
-    }
-
-    feedback.deletedAt = now;
-    await feedback.save();
-
-    // Ghi Audit DELETE_FEEDBACK
-    await auditService.log({
-      actor: {
-        userId,
-        role: user.userType || user.role,
-        email: user.email,
-      },
-      action: AUDIT_ACTIONS.DELETE_FEEDBACK,
-      resource: {
-        type: 'Feedback',
-        id: feedback.id,
-      },
-      reason: `Bệnh nhân #${userId} xóa mềm phản hồi #${feedback.id}`,
-      changes: {
-        feedbackId: feedback.id,
-        appointmentId: feedback.appointmentId,
-      },
-      req,
-    });
-
-    return {
-      success: true,
-      message: 'Xóa phản hồi thành công',
-      id: feedback.id,
-    };
-  }
-
-  /**
-   * UC-PAT-12: Viết sẵn hàm query public (getPublishedAnonymous)
-   *
-   * Quy tắc:
-   * 1. CHỈ lấy các bản ghi PUBLISHED (status === 'PUBLISHED') và chưa bị xóa mềm (deletedAt: null).
-   * 2. TUYỆT ĐỐI KHÔNG trả trường userId, email thật.
-   * 3. Tên người đánh giá: nếu isAnonymous = true -> hiển thị 'Ẩn danh'; nếu false -> hiển thị tên rút gọn (ví dụ 'N. V. Hùng').
-   * 4. CHƯA mở endpoint public, chờ policy Guest.
-   */
-  async getPublishedAnonymous(query = {}) {
-    const filter = {
-      status: FEEDBACK_STATUSES.PUBLISHED,
-      deletedAt: null,
-    };
-
-    const page = Math.max(1, Number(query.page) || 1);
-    const limit = Math.min(50, Math.max(1, Number(query.limit) || 10));
-    const skip = (page - 1) * limit;
-
-    const feedbacks = await Feedback.find(filter)
-      .sort({ createdAt: -1, id: -1 })
-      .skip(skip)
-      .limit(limit)
-      .lean();
-
-    // Lấy tên các user để làm mask (nếu không ẩn danh)
-    const userIds = [...new Set(feedbacks.map((f) => f.userId).filter(Boolean))];
-    const users = await User.find({ id: { $in: userIds } })
-      .select('id fullName')
-      .lean();
-    const userMap = new Map(users.map((u) => [u.id, u.fullName]));
-
-    return feedbacks.map((fb) => {
-      const isAnon = Boolean(fb.isAnonymous);
-      const originalName = userMap.get(fb.userId) || 'Bệnh nhân';
-      const patientName = isAnon ? 'Ẩn danh' : maskName(originalName);
-
-      return {
-        id: fb.id,
-        // TUYỆT ĐỐI KHÔNG có userId hay patientEmail
-        patientName,
-        rating: fb.rating,
-        title: fb.title || undefined,
-        comment: fb.comment,
-        category: fb.category || undefined,
-        isAnonymous: isAnon,
-        adminResponse: fb.adminResponse || undefined,
-        adminRespondedAt: fb.adminRespondedAt ? new Date(fb.adminRespondedAt).toISOString() : undefined,
-        createdAt: fb.createdAt ? new Date(fb.createdAt).toISOString() : new Date().toISOString(),
-      };
-    });
-  }
-
-  /**
-   * Helper serialize FeedbackItem khớp interface frontend web/src/api/feedback.ts
-   */
   serializeFeedbackItem(feedback, currentUser = null) {
     const isDoc = feedback.toObject ? feedback.toObject() : feedback;
-    const isOwner = currentUser ? (currentUser.id === isDoc.userId || currentUser.userId === isDoc.userId) : false;
+    const userId = currentUser ? Number(currentUser.id || currentUser.userId) : null;
+    const isOwner = userId ? userId === Number(isDoc.userId) : false;
 
     return {
       id: isDoc.id,
@@ -472,12 +108,422 @@ class FeedbackService {
       isOwner,
     };
   }
+
+  async createFeedback(user, payload = {}, req = null) {
+    if (!user || (user.userType !== ROLES.PATIENT && user.role !== ROLES.PATIENT)) {
+      throw new ApiError(403, 'Chỉ bệnh nhân mới có quyền gửi đánh giá phản hồi', 'FORBIDDEN_ROLE');
+    }
+
+    const userId = Number(user.id || user.userId);
+    if (!Number.isSafeInteger(userId) || userId <= 0) {
+      throw new ApiError(401, 'Thông tin người dùng không hợp lệ', 'INVALID_USER_ID');
+    }
+
+    const { appointmentId, rating, comment, title, category, isAnonymous } = payload;
+
+    const numRating = Number(rating);
+    if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
+      throw new ApiError(400, 'rating phải là số nguyên từ 1 đến 5', 'INVALID_RATING');
+    }
+
+    const cleanComment = sanitizeComment(comment, 2000);
+    if (!cleanComment) {
+      throw new ApiError(400, 'Nội dung phản hồi (comment) không được để trống', 'EMPTY_COMMENT');
+    }
+
+    const cleanTitle = title && typeof title === 'string' ? sanitizeComment(title, 255) : null;
+    const cleanCategory = category && typeof category === 'string' ? category.trim().slice(0, 100) : 'Khác';
+    const anonymousFlag = Boolean(isAnonymous);
+
+    let docDoctorId = null;
+    let numApptId = null;
+
+    if (appointmentId !== undefined && appointmentId !== null && appointmentId !== '') {
+      numApptId = Number(appointmentId);
+      if (!Number.isSafeInteger(numApptId) || numApptId <= 0) {
+        throw new ApiError(400, 'appointmentId phải là số nguyên dương hợp lệ', 'INVALID_APPOINTMENT_ID');
+      }
+
+      const appointment = await Appointment.findOne({ id: numApptId }).lean();
+      if (!appointment) {
+        throw new ApiError(404, 'Không tìm thấy lịch hẹn', 'APPOINTMENT_NOT_FOUND');
+      }
+
+      const isOwner = appointment.patientId === userId;
+      if (!isOwner) {
+        throw new ApiError(404, 'Lịch hẹn không thuộc quyền quản lý của bạn', 'APPOINTMENT_NOT_FOUND');
+      }
+
+      if (appointment.status !== APPOINTMENT_STATUSES.COMPLETED) {
+        throw new ApiError(409, 'Chỉ có thể đánh giá cho lịch hẹn đã hoàn thành khám', 'APPOINTMENT_NOT_COMPLETED');
+      }
+
+      const existingActive = await Feedback.findOne({
+        appointmentId: numApptId,
+        userId,
+        deletedAt: null,
+      }).lean();
+      if (existingActive) {
+        throw new ApiError(409, 'Bạn đã gửi đánh giá cho lịch hẹn này rồi', 'FEEDBACK_EXISTS');
+      }
+
+      docDoctorId = appointment.doctorId || null;
+    }
+
+    const created = await Feedback.create({
+      userId,
+      appointmentId: numApptId,
+      doctorId: docDoctorId,
+      rating: numRating,
+      title: cleanTitle,
+      comment: cleanComment,
+      category: cleanCategory,
+      isAnonymous: anonymousFlag,
+      status: FEEDBACK_STATUSES.APPROVED,
+    });
+
+    const author = await User.findOne({ id: userId }).select('id fullName email').lean();
+    return serializeFeedback(created, author, user);
+  }
+
+  async getMyFeedbacks(user, query = {}) {
+    if (!user) {
+      throw new ApiError(401, 'Vui lòng đăng nhập', 'UNAUTHORIZED');
+    }
+    const userId = Number(user.id || user.userId);
+    const page = Math.max(1, parseInt(query.page, 10) || 1);
+    const limit = Math.min(50, Math.max(1, parseInt(query.limit, 10) || 10));
+    const skip = (page - 1) * limit;
+
+    const filter = { userId, deletedAt: null };
+    const [items, total] = await Promise.all([
+      Feedback.find(filter).sort({ createdAt: -1 }).skip(skip).limit(limit).lean(),
+      Feedback.countDocuments(filter),
+    ]);
+
+    const author = await User.findOne({ id: userId }).select('id fullName email').lean();
+    return {
+      items: items.map((f) => serializeFeedback(f, author, user)),
+      pagination: {
+        page,
+        limit,
+        total,
+        totalPages: Math.ceil(total / limit) || 1,
+      },
+    };
+  }
+
+  async updateFeedback(user, feedbackId, payload = {}, req = null) {
+    const id = parsePositiveInt(feedbackId, 'Feedback ID');
+    const feedback = await Feedback.findOne({ id, deletedAt: null });
+    if (!feedback) {
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`);
+    }
+
+    const userId = Number(user.id || user.userId);
+    if (Number(feedback.userId) !== userId) {
+      throw new ApiError(403, 'Bạn không có quyền chỉnh sửa đánh giá này');
+    }
+
+    if (payload.rating !== undefined) {
+      const numRating = Number(payload.rating);
+      if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
+        throw new ApiError(400, 'rating phải là số nguyên từ 1 đến 5');
+      }
+      feedback.rating = numRating;
+    }
+
+    if (payload.comment !== undefined) {
+      const cleanComment = sanitizeComment(payload.comment, 2000);
+      if (!cleanComment) {
+        throw new ApiError(400, 'Nội dung phản hồi không được để trống');
+      }
+      feedback.comment = cleanComment;
+    }
+
+    if (payload.title !== undefined) {
+      feedback.title = payload.title ? sanitizeComment(payload.title, 255) : null;
+    }
+
+    if (payload.category !== undefined) {
+      feedback.category = payload.category ? String(payload.category).trim().slice(0, 100) : feedback.category;
+    }
+
+    if (payload.isAnonymous !== undefined) {
+      feedback.isAnonymous = Boolean(payload.isAnonymous);
+    }
+
+    await feedback.save();
+    const author = await User.findOne({ id: userId }).select('id fullName email').lean();
+    return serializeFeedback(feedback, author, user);
+  }
+
+  async updateFeedbackByOwner(user, idParam, payload, req = null) {
+    return this.updateFeedback(user, idParam, payload, req);
+  }
+
+  async deleteFeedback(actor, idParam, req = null) {
+    const id = parsePositiveInt(idParam, 'Feedback ID');
+    const feedback = await Feedback.findOne({ id });
+    if (!feedback || (feedback.deletedAt && actor?.userType !== 'Admin')) {
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`);
+    }
+
+    const isAdmin = actor && (actor.userType === 'Admin' || actor.role === 'Admin');
+    const isOwner = actor && Number(actor.id || actor.userId) === Number(feedback.userId);
+
+    if (!isAdmin && !isOwner) {
+      throw new ApiError(403, 'Bạn không có quyền xóa đánh giá này');
+    }
+
+    if (isAdmin) {
+      await Feedback.deleteOne({ id });
+    } else {
+      feedback.deletedAt = new Date();
+      await feedback.save();
+    }
+
+    return {
+      success: true,
+      deleted: true,
+      message: 'Xóa đánh giá thành công',
+    };
+  }
+
+  async getPublicFeedbacks(query = {}, viewer = null) {
+    const filter = {
+      status: FEEDBACK_STATUSES.APPROVED,
+      deletedAt: null,
+    };
+
+    if (query.rating) {
+      const r = Number(query.rating);
+      if (Number.isInteger(r) && r >= 1 && r <= 5) filter.rating = r;
+    }
+
+    const feedbacks = await Feedback.find(filter).sort({ createdAt: -1 });
+    if (feedbacks.length === 0) return [];
+
+    const userIds = [...new Set(feedbacks.map((f) => f.userId).filter(Boolean))];
+    const users = await User.find({ id: { $in: userIds } }).select('id fullName email').lean();
+    const userMap = new Map(users.map((u) => [u.id, u]));
+
+    return feedbacks.map((f) => serializeFeedback(f, userMap.get(f.userId), viewer, false));
+  }
+
+  async getFeedbackStats() {
+    const feedbacks = await Feedback.find({
+      status: FEEDBACK_STATUSES.APPROVED,
+      deletedAt: null,
+    }).select('rating').lean();
+
+    const totalFeedbacks = feedbacks.length;
+    const starCounts = { 1: 0, 2: 0, 3: 0, 4: 0, 5: 0 };
+    let sum = 0;
+
+    for (const f of feedbacks) {
+      const r = f.rating;
+      if (r >= 1 && r <= 5) {
+        starCounts[r] = (starCounts[r] || 0) + 1;
+        sum += r;
+      }
+    }
+
+    const averageRating = totalFeedbacks > 0 ? Number((sum / totalFeedbacks).toFixed(1)) : 0;
+
+    return {
+      totalFeedbacks,
+      averageRating,
+      starCounts,
+    };
+  }
+
+  async getAllFeedbacksForAdmin(filters = {}) {
+    const query = { deletedAt: null };
+
+    if (filters.status && FEEDBACK_STATUS_VALUES.includes(String(filters.status).toUpperCase())) {
+      query.status = String(filters.status).toUpperCase();
+    }
+
+    if (filters.rating) {
+      const r = Number(filters.rating);
+      if (Number.isInteger(r) && r >= 1 && r <= 5) {
+        query.rating = r;
+      }
+    }
+
+    if (filters.category && typeof filters.category === 'string' && filters.category.trim()) {
+      query.category = filters.category.trim();
+    }
+
+    const feedbacks = await Feedback.find(query).sort({ createdAt: -1 });
+    if (feedbacks.length === 0) return [];
+
+    const userIds = new Set();
+    for (const item of feedbacks) {
+      if (item.userId) userIds.add(item.userId);
+      if (item.adminRespondedBy) userIds.add(item.adminRespondedBy);
+      if (item.moderatedBy) userIds.add(item.moderatedBy);
+    }
+
+    const users = await User.find({ id: { $in: [...userIds] } }).select('id fullName email').lean();
+    const userMap = new Map(users.map((u) => [u.id, u]));
+
+    return feedbacks.map((f) => {
+      const item = serializeFeedback(f, userMap.get(f.userId), null, true);
+      if (f.adminRespondedBy) {
+        item.adminRespondedByName = userMap.get(f.adminRespondedBy)?.fullName || null;
+      }
+      if (f.moderatedBy) {
+        item.moderatedByName = userMap.get(f.moderatedBy)?.fullName || null;
+      }
+      return item;
+    });
+  }
+
+  async getFeedbackDetailForAdmin(idParam) {
+    const id = parsePositiveInt(idParam, 'Feedback ID');
+    const feedback = await Feedback.findOne({ id });
+    if (!feedback) {
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`);
+    }
+
+    const userIds = [feedback.userId, feedback.adminRespondedBy, feedback.moderatedBy].filter(Boolean);
+    const users = await User.find({ id: { $in: userIds } }).select('id fullName email').lean();
+    const userMap = new Map(users.map((u) => [u.id, u]));
+
+    const item = serializeFeedback(feedback, userMap.get(feedback.userId), null, true);
+    if (feedback.adminRespondedBy) {
+      item.adminRespondedByName = userMap.get(feedback.adminRespondedBy)?.fullName || null;
+    }
+    if (feedback.moderatedBy) {
+      item.moderatedByName = userMap.get(feedback.moderatedBy)?.fullName || null;
+    }
+
+    return item;
+  }
+
+  async respondToFeedback(actor, idParam, payload = {}, req = null) {
+    const id = parsePositiveInt(idParam, 'Feedback ID');
+    const feedback = await Feedback.findOne({ id });
+    if (!feedback) {
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`);
+    }
+
+    const rawResponse = payload.adminResponse !== undefined ? payload.adminResponse : payload.response;
+    if (!rawResponse || typeof rawResponse !== 'string' || !rawResponse.trim()) {
+      throw new ApiError(400, 'Nội dung phản hồi của Admin không được để trống');
+    }
+
+    const responseText = rawResponse.trim();
+    if (responseText.length > 2000) {
+      throw new ApiError(400, 'Nội dung phản hồi không được vượt quá 2000 ký tự');
+    }
+
+    const beforeSnap = {
+      adminResponse: feedback.adminResponse,
+      adminRespondedAt: feedback.adminRespondedAt,
+      adminRespondedBy: feedback.adminRespondedBy,
+    };
+
+    const respondedAt = new Date();
+    feedback.adminResponse = responseText;
+    feedback.adminRespondedAt = respondedAt;
+    feedback.adminRespondedBy = actor.id;
+
+    await feedback.save();
+
+    await recordAudit({
+      actor,
+      action: AUDIT_ACTIONS.FEEDBACK_RESPONSE,
+      targetType: 'Feedback',
+      targetId: feedback.id,
+      reason: `Admin phản hồi đánh giá #${feedback.id}`,
+      changes: {
+        before: beforeSnap,
+        after: {
+          adminResponse: responseText,
+          adminRespondedAt: respondedAt.toISOString(),
+          adminRespondedBy: actor.id,
+        },
+      },
+      req,
+    });
+
+    return this.getFeedbackDetailForAdmin(id);
+  }
+
+  async changeFeedbackStatus(actor, idParam, payload = {}, req = null) {
+    const id = parsePositiveInt(idParam, 'Feedback ID');
+    const feedback = await Feedback.findOne({ id });
+    if (!feedback) {
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`);
+    }
+
+    const rawStatus = payload.status ? String(payload.status).trim().toUpperCase() : '';
+    if (!FEEDBACK_STATUS_VALUES.includes(rawStatus)) {
+      throw new ApiError(
+        400,
+        `Trạng thái kiểm duyệt không hợp lệ. Hỗ trợ: ${FEEDBACK_STATUS_VALUES.join(', ')}`,
+      );
+    }
+
+    const beforeSnap = {
+      status: feedback.status,
+      moderatedBy: feedback.moderatedBy,
+      moderatedAt: feedback.moderatedAt,
+    };
+
+    const moderatedAt = new Date();
+    feedback.status = rawStatus;
+    feedback.moderatedBy = actor.id;
+    feedback.moderatedAt = moderatedAt;
+
+    await feedback.save();
+
+    let action = AUDIT_ACTIONS.FEEDBACK_STATUS_CHANGE;
+    if (rawStatus === FEEDBACK_STATUSES.APPROVED) action = AUDIT_ACTIONS.FEEDBACK_PUBLISH;
+    if (rawStatus === FEEDBACK_STATUSES.HIDDEN || rawStatus === FEEDBACK_STATUSES.REJECTED) {
+      action = AUDIT_ACTIONS.FEEDBACK_HIDE;
+    }
+
+    await recordAudit({
+      actor,
+      action,
+      targetType: 'Feedback',
+      targetId: feedback.id,
+      reason: payload.reason || `Admin thay đổi trạng thái đánh giá #${feedback.id} sang ${rawStatus}`,
+      changes: {
+        before: beforeSnap,
+        after: {
+          status: rawStatus,
+          moderatedBy: actor.id,
+          moderatedAt: moderatedAt.toISOString(),
+        },
+      },
+      req,
+    });
+
+    return this.getFeedbackDetailForAdmin(id);
+  }
 }
 
 const feedbackService = new FeedbackService();
+
 module.exports = {
   feedbackService,
   FeedbackService,
   sanitizeComment,
   maskName,
+  getPublicFeedbacks: feedbackService.getPublicFeedbacks.bind(feedbackService),
+  getFeedbackStats: feedbackService.getFeedbackStats.bind(feedbackService),
+  getMyFeedbacks: feedbackService.getMyFeedbacks.bind(feedbackService),
+  createFeedback: feedbackService.createFeedback.bind(feedbackService),
+  updateFeedback: feedbackService.updateFeedback.bind(feedbackService),
+  updateFeedbackByOwner: feedbackService.updateFeedbackByOwner.bind(feedbackService),
+  deleteFeedback: feedbackService.deleteFeedback.bind(feedbackService),
+  getAllFeedbacksForAdmin: feedbackService.getAllFeedbacksForAdmin.bind(feedbackService),
+  getFeedbackDetailForAdmin: feedbackService.getFeedbackDetailForAdmin.bind(feedbackService),
+  respondToFeedback: feedbackService.respondToFeedback.bind(feedbackService),
+  changeFeedbackStatus: feedbackService.changeFeedbackStatus.bind(feedbackService),
 };

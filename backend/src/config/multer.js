@@ -23,15 +23,17 @@ function createImageUploader(subFolder = 'doctors') {
     },
     filename: (req, file, cb) => {
       const ext = path.extname(file.originalname || '').toLowerCase() || '.jpg';
-      const prefix = req.params.doctorId ? `doctor-${req.params.doctorId}` : 'img';
+      let prefix = 'img';
+      if (req.params.doctorId) prefix = `doctor-${req.params.doctorId}`;
+      else if (req.params.specialtyId) prefix = `specialty-${req.params.specialtyId}`;
       const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e6)}`;
       cb(null, `${prefix}-${uniqueSuffix}${ext}`);
     },
   });
 
   const fileFilter = (_req, file, cb) => {
-    if (!ALLOWED_IMAGE_MIMES.has(file.mimetype)) {
-      return cb(new ApiError(400, 'Chỉ chấp nhận file ảnh (JPEG, PNG, WEBP, GIF)'));
+    if (!file || !file.mimetype || !ALLOWED_IMAGE_MIMES.has(file.mimetype.toLowerCase())) {
+      return cb(new ApiError(400, 'Chỉ chấp nhận file ảnh định dạng JPEG, PNG, WEBP, GIF'));
     }
     return cb(null, true);
   };

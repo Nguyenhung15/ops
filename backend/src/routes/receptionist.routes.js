@@ -10,6 +10,7 @@ router.use(authenticate, authorize(ROLES.ADMIN));
 router.get('/all', receptionistController.getAllReceptionists);
 router.get('/:id', receptionistController.getReceptionistById);
 router.put('/update/:id', receptionistController.updateReceptionist);
+router.delete('/:id', receptionistController.deleteReceptionist);
 
 module.exports = router;
 

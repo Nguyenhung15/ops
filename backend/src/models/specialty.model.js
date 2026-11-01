@@ -13,6 +13,15 @@ const specialtySchema = new mongoose.Schema(
       type: String,
       default: '',
     },
+    isEnable: {
+      type: Boolean,
+      default: true,
+      index: true,
+    },
+    imageUrl: {
+      type: String,
+      default: null,
+    },
   },
   {
     timestamps: true,
@@ -21,6 +30,10 @@ const specialtySchema = new mongoose.Schema(
 
 specialtySchema.plugin(baseSchemaPlugin, {
   sequenceName: 'specialties',
+  extraTransform: (_doc, ret) => {
+    ret.isEnabled = Boolean(ret.isEnable);
+    return ret;
+  },
 });
 
 const Specialty = mongoose.model('Specialty', specialtySchema, 'specialties');

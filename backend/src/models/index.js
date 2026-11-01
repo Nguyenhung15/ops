@@ -17,7 +17,9 @@ const PatientProfile = require('./patientProfile.model');
 const OutboxEvent = require('./outboxEvent.model');
 const Event = require('./event.model');
 const EventRegistration = require('./eventRegistration.model');
-const { Voucher, UserVoucher } = require('./voucher.model');
+const UserEvent = require('./userEvent.model');
+const Voucher = require('./voucher.model');
+const UserVoucher = require('./userVoucher.model');
 const Feedback = require('./feedback.model');
 
 module.exports = {
@@ -42,6 +44,7 @@ module.exports = {
   OutboxEvent,
   Event,
   EventRegistration,
+  UserEvent,
   Voucher,
   UserVoucher,
   Feedback,

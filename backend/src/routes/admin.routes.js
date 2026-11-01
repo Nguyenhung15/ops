@@ -1,5 +1,6 @@
 const { Router } = require('express');
 const adminController = require('../controllers/admin.controller');
+const specialtyController = require('../controllers/specialty.controller');
 const { authenticate, authorize } = require('../middlewares/auth.middleware');
 const { ROLES } = require('../constants/enums');
 
@@ -38,7 +39,7 @@ router.get(
 router.delete(
   '/users/:userId',
   authorize(ROLES.ADMIN, ROLES.RECEPTIONIST),
-  adminController.lockUser,
+  adminController.deleteOrLockUser,
 );
 router.post(
   '/activate/:userId',
@@ -91,6 +92,58 @@ router.put(
   '/update-doctor/:id',
   authorize(ROLES.ADMIN),
   adminController.updateDoctor,
+);
+router.get(
+  '/doctors/:id',
+  authorize(ROLES.ADMIN),
+  adminController.getUserDetail,
+);
+router.put(
+  '/doctors/:id',
+  authorize(ROLES.ADMIN),
+  adminController.updateDoctor,
+);
+router.delete(
+  '/doctors/:id',
+  authorize(ROLES.ADMIN),
+  adminController.deleteDoctor,
+);
+router.get(
+  '/receptionists/:id',
+  authorize(ROLES.ADMIN),
+  adminController.getUserDetail,
+);
+router.delete(
+  '/receptionists/:id',
+  authorize(ROLES.ADMIN),
+  adminController.deleteReceptionist,
+);
+router.delete(
+  '/staff/:id',
+  authorize(ROLES.ADMIN),
+  adminController.deleteStaff,
+);
+
+// Specialty management under /api/admin/specialties
+router.get(
+  '/specialties',
+  authorize(ROLES.ADMIN),
+  specialtyController.getAllSpecialties,
+);
+router.post(
+  '/specialties',
+  authorize(ROLES.ADMIN),
+  specialtyController.createSpecialty,
+);
+router.put(
+  '/specialties/:id',
+  authorize(ROLES.ADMIN),
+  specialtyController.updateSpecialty,
+);
+router.delete(
+  '/specialties/:id',
+  authorize(ROLES.ADMIN),
+  specialtyController.deleteSpecialty,
 );
 
 module.exports = router;

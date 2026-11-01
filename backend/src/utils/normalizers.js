@@ -20,11 +20,30 @@ function normalizeEmail(value) {
     throw new ApiError(400, 'Email không hợp lệ');
   }
   const email = value.trim().toLowerCase();
-  const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+  const emailRegex = /^[a-zA-Z0-9]+([._%+-][a-zA-Z0-9]+)*@[a-zA-Z0-9]+([.-][a-zA-Z0-9]+)*\.[a-zA-Z]{2,}$/;
   if (!emailRegex.test(email)) {
     throw new ApiError(400, 'Định dạng email không hợp lệ');
   }
   return email;
+}
+
+/**
+ * Normalize and validate Vietnamese/international phone number format.
+ * Accepts: 10 digits starting with 0 (e.g. 0912345678) or international format (+84912345678).
+ */
+function normalizePhoneNumber(value, { required = false } = {}) {
+  if (value == null || String(value).trim() === '') {
+    if (required) {
+      throw new ApiError(400, 'Số điện thoại không được để trống');
+    }
+    return null;
+  }
+  const phone = String(value).trim().replace(/[\s.-]+/g, '');
+  const phoneRegex = /^(?:\+84|0)[1-9]\d{8}$/;
+  if (!phoneRegex.test(phone)) {
+    throw new ApiError(400, 'Số điện thoại không đúng định dạng (yêu cầu 10 chữ số, ví dụ 0945148484)');
+  }
+  return phone;
 }
 
 /**
@@ -66,6 +85,7 @@ function escapeRegex(text = '') {
 module.exports = {
   normalizeGender,
   normalizeEmail,
+  normalizePhoneNumber,
   normalizeRole,
   parsePositiveInt,
   escapeRegex,

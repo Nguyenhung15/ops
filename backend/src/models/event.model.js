@@ -21,10 +21,12 @@ const eventSchema = new mongoose.Schema(
     startDate: {
       type: Date,
       required: true,
+      index: true,
     },
     endDate: {
       type: Date,
       required: true,
+      index: true,
     },
     isEnabled: {
       type: Boolean,
@@ -52,10 +54,24 @@ const eventSchema = new mongoose.Schema(
 
 eventSchema.index({ startDate: 1, endDate: 1, isEnabled: 1 });
 
+eventSchema.virtual('enabled').get(function () {
+  return this.isEnabled;
+});
+
+eventSchema.virtual('enabled').set(function (val) {
+  this.isEnabled = Boolean(val);
+});
+
 eventSchema.plugin(baseSchemaPlugin, {
   sequenceName: 'events',
   extraTransform: (_doc, ret) => {
     ret.enabled = Boolean(ret.isEnabled);
+    if (ret.startDate instanceof Date) {
+      ret.startDate = ret.startDate.toISOString();
+    }
+    if (ret.endDate instanceof Date) {
+      ret.endDate = ret.endDate.toISOString();
+    }
     return ret;
   },
 });

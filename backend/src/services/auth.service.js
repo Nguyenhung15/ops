@@ -1,6 +1,6 @@
 const bcrypt = require('bcryptjs');
 const ApiError = require('../utils/ApiError');
-const { normalizeEmail, normalizeGender } = require('../utils/normalizers');
+const { normalizeEmail, normalizePhoneNumber, normalizeGender } = require('../utils/normalizers');
 const { signAccessToken } = require('../utils/jwt');
 const { ROLES, AUTH_PROVIDERS, AUDIT_ACTIONS } = require('../constants/enums');
 const { User } = require('../models');
@@ -72,7 +72,7 @@ async function registerPatient(payload) {
   const created = await User.create({
     fullName,
     email,
-    phoneNumber: payload?.phoneNumber ? String(payload.phoneNumber).trim() : null,
+    phoneNumber: normalizePhoneNumber(payload?.phoneNumber),
     password: hashedPassword,
     gender: normalizeGender(payload?.gender),
     userType: ROLES.PATIENT,
