@@ -6,12 +6,15 @@ const {
   Specialty,
   PatientProfile,
   Prescription,
+  UserVoucher,
 } = require('../models');
 const { ROLES, APPOINTMENT_STATUSES, AUDIT_ACTIONS } = require('../constants/enums');
 const { recordAudit } = require('./audit.service');
 const ApiError = require('../utils/ApiError');
 const { parsePositiveInt, normalizeGender } = require('../utils/normalizers');
 const patientProfileService = require('./patientProfile.service');
+const voucherRedemptionService = require('./voucherRedemption.service');
+const { clock } = require('./clock.service');
 const env = require('../config/env');
 
 const getTodayString = () => {
@@ -33,9 +36,10 @@ const getCurrentTimeString = () =>
     hourCycle: 'h23',
   }).format(new Date());
 
-const generateAppointmentNo = () => {
+const generateAppointmentNo = (type = 'OFFLINE') => {
   const randomHex = crypto.randomBytes(4).toString('hex').toUpperCase();
-  return `OFF${randomHex}`;
+  const prefix = String(type).toUpperCase() === 'ONLINE' ? 'ONL' : 'OFF';
+  return `${prefix}${randomHex}`;
 };
 
 /**
@@ -238,7 +242,8 @@ async function bookAppointment(user, query = {}, body = {}) {
   }
 
   const requestedSlotsCount = snapshotPatients.length;
-  const appointmentType = body.appointment?.type === 'ONLINE' ? 'ONLINE' : 'OFFLINE';
+  const rawType = body.appointment?.type || body.type || query.type || shift.type;
+  const appointmentType = String(rawType).toUpperCase() === 'ONLINE' ? 'ONLINE' : 'OFFLINE';
   const reason =
     typeof body.appointment?.reason === 'string' ? body.appointment.reason.trim() : null;
 
@@ -314,12 +319,27 @@ async function bookAppointment(user, query = {}, body = {}) {
     }
   }
 
+  // Xác định phí khám và chính sách thanh toán cho lịch hẹn
+  const doctorFee = (doctor && Number.isFinite(Number(doctor.consultationFee)))
+    ? Math.max(0, Math.floor(Number(doctor.consultationFee)))
+    : 0;
+  const totalConsultationFee = doctorFee * requestedSlotsCount;
+  const requiresPayment = Boolean(
+    appointmentType === 'ONLINE' &&
+    env.onlineRequirePaymentBeforeJoin &&
+    totalConsultationFee > 0,
+  );
+  const initialStatus = requiresPayment
+    ? APPOINTMENT_STATUSES.PENDING_PAYMENT
+    : APPOINTMENT_STATUSES.PENDING_CONFIRMATION;
+  const initialPaymentStatus = requiresPayment ? 'PENDING' : null;
+
   // 9. Create Appointment record with retry on unique appointmentNo (max 3 times)
   let appointment = null;
   let createError = null;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
-    const appointmentNo = generateAppointmentNo();
+    const appointmentNo = generateAppointmentNo(appointmentType);
     try {
       appointment = await Appointment.create({
         appointmentNo,
@@ -331,9 +351,11 @@ async function bookAppointment(user, query = {}, body = {}) {
         appointmentDate: shift.date,
         appointmentTime: firstSlotTime,
         type: appointmentType,
-        status: 'PENDING_CONFIRMATION',
+        status: initialStatus,
+        paymentStatus: initialPaymentStatus,
         reason,
         patients: snapshotPatients,
+        createdAt: clock.now(),
       });
       break;
     } catch (err) {
@@ -421,6 +443,13 @@ async function bookAppointment(user, query = {}, body = {}) {
     }
   }
 
+  // Tính thời hạn thanh toán nếu cần thanh toán
+  const holdMinutes = env.paymentAppointmentHoldMinutes || 30;
+  const createdAtDate = appointment.createdAt ? new Date(appointment.createdAt) : new Date();
+  const paymentDueAt = requiresPayment
+    ? new Date(createdAtDate.getTime() + holdMinutes * 60 * 1000).toISOString()
+    : undefined;
+
   // 11. Format final response
   return {
     id: appointment.id,
@@ -439,6 +468,9 @@ async function bookAppointment(user, query = {}, body = {}) {
     specialtyName: specialty.name,
     reason: appointment.reason,
     patients: appointment.patients,
+    paymentStatus: appointment.paymentStatus || undefined,
+    requiresPayment,
+    paymentDueAt,
   };
 }
 
@@ -581,6 +613,7 @@ async function getMyUpcomingAppointments(user) {
   }
 
   const upcomingStatuses = [
+    APPOINTMENT_STATUSES.PENDING_PAYMENT,
     APPOINTMENT_STATUSES.PENDING_CONFIRMATION,
     APPOINTMENT_STATUSES.CONFIRMED,
     APPOINTMENT_STATUSES.CHECKED_IN,
@@ -900,6 +933,19 @@ async function cancelPatientAppointment(user, appointmentId, body = {}, req = nu
       );
       throw new ApiError(500, 'Không thể giải phóng khung giờ khám, thao tác hủy đã được hoàn tác');
     }
+  }
+
+  // 7.1 Giải phóng voucher đang giữ cho lịch hẹn (nếu có)
+  try {
+    const heldVoucher = await UserVoucher.findOne({
+      appointmentId: appointment.id,
+      used: true,
+    }).lean();
+    if (heldVoucher) {
+      await voucherRedemptionService.release(heldVoucher.id, appointment.id, user, req);
+    }
+  } catch (voucherErr) {
+    console.error(`[cancelPatientAppointment] Không thể giải phóng voucher cho lịch hẹn ${appointment.id}:`, voucherErr);
   }
 
   // 8. Enforce 3-cancellation booking lock policy for 24 hours (BR-03, A6)

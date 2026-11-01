@@ -62,6 +62,11 @@ const paymentTransactionSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    needsReconcile: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
   },
   {
     timestamps: true,

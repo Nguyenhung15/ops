@@ -59,7 +59,33 @@ class OnlineConsultationService {
       throw new ApiError(409, 'Lịch khám này không phải hình thức khám trực tuyến (ONLINE)', 'NOT_ONLINE_APPOINTMENT');
     }
 
-    // 3. Kiểm tra State: Phải là CONFIRMED (cho vào lại khi CHECKED_IN hoặc IN_PROGRESS), khác thì 409
+    // 3. Nếu lịch đang ở PENDING_PAYMENT: trả về 409 PAYMENT_REQUIRED kèm paymentUrl
+    if (appointment.status === APPOINTMENT_STATUSES.PENDING_PAYMENT) {
+      let paymentUrl = null;
+      try {
+        const createRes = await paymentService.createPaymentUrl({
+          user: actor,
+          appointmentId: appointment.id,
+          req,
+        });
+        paymentUrl = createRes.paymentUrl;
+      } catch (urlErr) {
+        console.error(`[joinOnline] Lỗi tạo paymentUrl cho lịch hẹn #${appointment.id}:`, urlErr.message);
+      }
+
+      const err = new ApiError(
+        409,
+        'Lịch hẹn khám trực tuyến yêu cầu thanh toán thành công trước khi vào phòng khám',
+        'PAYMENT_REQUIRED',
+        paymentUrl ? [{ paymentUrl }] : [],
+      );
+      if (paymentUrl) {
+        err.paymentUrl = paymentUrl;
+      }
+      throw err;
+    }
+
+    // 4. Kiểm tra State: Phải là CONFIRMED (cho vào lại khi CHECKED_IN hoặc IN_PROGRESS), khác thì 409 INVALID_APPOINTMENT_STATUS
     const allowedStatuses = [
       APPOINTMENT_STATUSES.CONFIRMED,
       APPOINTMENT_STATUSES.CHECKED_IN,
@@ -73,33 +99,27 @@ class OnlineConsultationService {
       );
     }
 
-    // 4. Kiểm tra thanh toán nếu cờ ONLINE_REQUIRE_PAYMENT_BEFORE_JOIN bật
+    // 5. Kiểm tra thanh toán nếu cờ ONLINE_REQUIRE_PAYMENT_BEFORE_JOIN bật
     if (env.onlineRequirePaymentBeforeJoin) {
-      const successPayment = await PaymentTransaction.findOne({
-        appointmentId: appointment.id,
-        status: PAYMENT_STATUSES.SUCCESS,
-      }).lean();
+      // Chỉ bắt buộc thanh toán khi lịch thuộc luồng thanh toán:
+      // (appointment.paymentStatus có giá trị HOẶC đã có PaymentTransaction được tạo cho lịch này)
+      const hasPaymentFlow = Boolean(appointment.paymentStatus) || Boolean(
+        await PaymentTransaction.exists({ appointmentId: appointment.id }),
+      );
 
-      if (!successPayment) {
-        // Tạo paymentUrl tách riêng để bệnh nhân có thể thanh toán trước khi vào
-        let paymentUrl = null;
-        try {
-          const createRes = await paymentService.createPaymentUrl({
-            user: actor,
-            appointmentId: appointment.id,
-            req,
-          });
-          paymentUrl = createRes.paymentUrl;
-        } catch {
-          // Bỏ qua lỗi nếu tạo paymentUrl gặp xung đột, chỉ ném 409 PAYMENT_REQUIRED
+      if (hasPaymentFlow) {
+        const successPayment = await PaymentTransaction.findOne({
+          appointmentId: appointment.id,
+          status: PAYMENT_STATUSES.SUCCESS,
+        }).lean();
+
+        if (!successPayment) {
+          throw new ApiError(
+            409,
+            'Lịch hẹn khám trực tuyến yêu cầu thanh toán thành công trước khi vào phòng khám',
+            'PAYMENT_REQUIRED',
+          );
         }
-
-        throw new ApiError(
-          409,
-          'Lịch hẹn khám trực tuyến yêu cầu thanh toán thành công trước khi vào phòng khám',
-          'PAYMENT_REQUIRED',
-          paymentUrl ? { paymentUrl } : undefined,
-        );
       }
     }
 

@@ -96,6 +96,14 @@ async function confirmAppointment(actor, appointmentId) {
   }
 
   // 4. State validation: only PENDING_CONFIRMATION can be transitioned to CONFIRMED
+  if (appointment.status === APPOINTMENT_STATUSES.PENDING_PAYMENT) {
+    throw new ApiError(
+      409,
+      'Không thể xác nhận lịch hẹn: lịch đang chờ thanh toán',
+      'INVALID_STATE',
+    );
+  }
+
   if (appointment.status !== APPOINTMENT_STATUSES.PENDING_CONFIRMATION) {
     throw new ApiError(
       409,

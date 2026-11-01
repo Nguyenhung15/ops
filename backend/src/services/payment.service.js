@@ -148,6 +148,15 @@ class PaymentService {
       );
     }
 
+    const now = clock.now();
+
+    // Kiểm tra thời gian giữ lịch PENDING_PAYMENT (PAYMENT_APPOINTMENT_HOLD_MINUTES)
+    const holdMinutes = env.paymentAppointmentHoldMinutes || 30;
+    const createdAtTime = appointment.createdAt ? new Date(appointment.createdAt).getTime() : now.getTime();
+    if (now.getTime() - createdAtTime > holdMinutes * 60 * 1000) {
+      throw new ApiError(409, 'Lịch hẹn đã quá thời hạn giữ chỗ để thanh toán', 'APPOINTMENT_PAYMENT_EXPIRED');
+    }
+
     // 3. Kiểm tra xem đã có giao dịch SUCCESS chưa
     const existingSuccess = await PaymentTransaction.findOne({
       appointmentId: appointment.id,
@@ -156,8 +165,6 @@ class PaymentService {
     if (existingSuccess) {
       throw new ApiError(409, 'Lịch hẹn này đã được thanh toán thành công', 'ALREADY_PAID');
     }
-
-    const now = clock.now();
 
     // 4. Tính toán chi phí khám trên server (không tin client)
     let consultationFee = 0;
@@ -187,108 +194,120 @@ class PaymentService {
       appliedVoucherId = numVoucherId;
     }
 
-    const finalAmount = Math.max(0, totalAmount - discountAmount);
+    try {
+      const finalAmount = Math.max(0, totalAmount - discountAmount);
 
-    // 6. Xử lý giao dịch PENDING cũ cho cùng lịch hẹn:
-    // Hủy các giao dịch PENDING trước đó (vô hiệu hóa) để không để nhiều giao dịch hợp lệ song song
-    const oldPendingList = await PaymentTransaction.find({
-      appointmentId: appointment.id,
-      status: PAYMENT_STATUSES.PENDING,
-    });
-    for (const oldPending of oldPendingList) {
-      await PaymentTransaction.updateOne(
-        { id: oldPending.id, status: PAYMENT_STATUSES.PENDING },
-        { $set: { status: PAYMENT_STATUSES.EXPIRED } },
-      );
-      // Nếu giao dịch cũ có voucher khác với voucher mới, giải phóng voucher cũ
-      if (oldPending.userVoucherId && oldPending.userVoucherId !== appliedVoucherId) {
-        try {
-          await voucherRedemptionService.release(oldPending.userVoucherId, appointment.id, user, req);
-        } catch {
-          // Ignore release errors on old transactions
+      // 6. Xử lý giao dịch PENDING cũ cho cùng lịch hẹn:
+      // Hủy các giao dịch PENDING trước đó (vô hiệu hóa) để không để nhiều giao dịch hợp lệ song song
+      const oldPendingList = await PaymentTransaction.find({
+        appointmentId: appointment.id,
+        status: PAYMENT_STATUSES.PENDING,
+      });
+      for (const oldPending of oldPendingList) {
+        await PaymentTransaction.updateOne(
+          { id: oldPending.id, status: PAYMENT_STATUSES.PENDING },
+          { $set: { status: PAYMENT_STATUSES.EXPIRED } },
+        );
+        // Nếu giao dịch cũ có voucher khác với voucher mới, giải phóng voucher cũ
+        if (oldPending.userVoucherId && oldPending.userVoucherId !== appliedVoucherId) {
+          try {
+            await voucherRedemptionService.release(oldPending.userVoucherId, appointment.id, user, req);
+          } catch {
+            // Ignore release errors on old transactions
+          }
         }
       }
-    }
 
-    // 7. Tạo PaymentTransaction mới với transactionNo ngẫu nhiên mạnh
-    const randomHex = crypto.randomBytes(8).toString('hex').toUpperCase();
-    const transactionNo = `TXN${Date.now()}${randomHex}`;
-    const ttlMinutes = env.paymentPendingTtlMinutes || 15;
-    const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
+      // 7. Tạo PaymentTransaction mới với transactionNo ngẫu nhiên mạnh
+      const randomHex = crypto.randomBytes(8).toString('hex').toUpperCase();
+      const transactionNo = `TXN${Date.now()}${randomHex}`;
+      const ttlMinutes = env.paymentPendingTtlMinutes || 15;
+      const expiresAt = new Date(now.getTime() + ttlMinutes * 60 * 1000);
 
-    const transaction = await PaymentTransaction.create({
-      appointmentId: appointment.id,
-      userId: numUserId,
-      transactionNo,
-      amount: finalAmount,
-      discountAmount,
-      userVoucherId: appliedVoucherId,
-      status: PAYMENT_STATUSES.PENDING,
-      orderInfo: `Thanh toan lich hen ${appointment.appointmentNo}`,
-      expiresAt,
-    });
-
-    // 8. Tạo tham số và ký HMAC-SHA512 VNPay
-    const ipAddr =
-      req?.headers?.['x-forwarded-for']?.split(',')[0]?.trim() ||
-      req?.connection?.remoteAddress ||
-      req?.socket?.remoteAddress ||
-      '127.0.0.1';
-
-    const vnpParams = {
-      vnp_Version: '2.1.0',
-      vnp_Command: 'pay',
-      vnp_TmnCode: env.vnpTmnCode,
-      vnp_Amount: Math.round(finalAmount * 100), // nhân 100 theo VNPay
-      vnp_CreateDate: formatVNPayDate(now),
-      vnp_CurrCode: 'VND',
-      vnp_IpAddr: ipAddr,
-      vnp_Locale: 'vn',
-      vnp_OrderInfo: `Thanh toan lich hen ${appointment.appointmentNo}`,
-      vnp_OrderType: 'other',
-      vnp_ReturnUrl: env.vnpReturnUrl,
-      vnp_TxnRef: transactionNo,
-      vnp_ExpireDate: formatVNPayDate(expiresAt),
-    };
-
-    const paymentUrl = buildSignedVNPayUrl(env.vnpUrl, vnpParams, env.vnpHashSecret);
-
-    // 9. Audit log PAYMENT_CREATED
-    await auditService.log({
-      actor: {
+      const transaction = await PaymentTransaction.create({
+        appointmentId: appointment.id,
         userId: numUserId,
-        role: user.role || user.userType,
-        email: user.email,
-      },
-      action: AUDIT_ACTIONS.PAYMENT_CREATED,
-      resource: {
-        type: 'PaymentTransaction',
-        id: transaction.id,
-      },
-      reason: `Khởi tạo giao dịch thanh toán cho lịch hẹn #${appointment.id}`,
-      changes: {
         transactionNo,
         amount: finalAmount,
         discountAmount,
-        totalAmount,
-        appointmentId: appointment.id,
+        userVoucherId: appliedVoucherId,
         status: PAYMENT_STATUSES.PENDING,
-        expiresAt: expiresAt.toISOString(),
-      },
-      req,
-    });
+        orderInfo: `Thanh toan lich hen ${appointment.appointmentNo}`,
+        expiresAt,
+      });
 
-    return {
-      success: true,
-      transactionId: transaction.id,
-      transactionNo,
-      appointmentId: appointment.id,
-      appointmentNo: appointment.appointmentNo,
-      amount: finalAmount,
-      discountAmount,
-      paymentUrl, // Tách biệt khỏi meetingUrl
-      expiresAt: expiresAt.toISOString(),
-    };
+      // 8. Tạo tham số và ký HMAC-SHA512 VNPay
+      const ipAddr =
+        req?.headers?.['x-forwarded-for']?.split(',')[0]?.trim() ||
+        req?.connection?.remoteAddress ||
+        req?.socket?.remoteAddress ||
+        '127.0.0.1';
+
+      const vnpParams = {
+        vnp_Version: '2.1.0',
+        vnp_Command: 'pay',
+        vnp_TmnCode: env.vnpTmnCode,
+        vnp_Amount: Math.round(finalAmount * 100), // nhân 100 theo VNPay
+        vnp_CreateDate: formatVNPayDate(now),
+        vnp_CurrCode: 'VND',
+        vnp_IpAddr: ipAddr,
+        vnp_Locale: 'vn',
+        vnp_OrderInfo: `Thanh toan lich hen ${appointment.appointmentNo}`,
+        vnp_OrderType: 'other',
+        vnp_ReturnUrl: env.vnpReturnUrl,
+        vnp_TxnRef: transactionNo,
+        vnp_ExpireDate: formatVNPayDate(expiresAt),
+      };
+
+      const paymentUrl = buildSignedVNPayUrl(env.vnpUrl, vnpParams, env.vnpHashSecret);
+
+      // 9. Audit log PAYMENT_CREATED
+      await auditService.log({
+        actor: {
+          userId: numUserId,
+          role: user.role || user.userType,
+          email: user.email,
+        },
+        action: AUDIT_ACTIONS.PAYMENT_CREATED,
+        resource: {
+          type: 'PaymentTransaction',
+          id: transaction.id,
+        },
+        reason: `Khởi tạo giao dịch thanh toán cho lịch hẹn #${appointment.id}`,
+        changes: {
+          transactionNo,
+          amount: finalAmount,
+          discountAmount,
+          totalAmount,
+          appointmentId: appointment.id,
+          status: PAYMENT_STATUSES.PENDING,
+          expiresAt: expiresAt.toISOString(),
+        },
+        req,
+      });
+
+      return {
+        success: true,
+        transactionId: transaction.id,
+        transactionNo,
+        appointmentId: appointment.id,
+        paymentUrl,
+        amount: finalAmount,
+        discountAmount,
+        totalAmount,
+        expiresAt: expiresAt.toISOString(),
+      };
+    } catch (stepErr) {
+      // Nếu có lỗi sau khi voucherRedemption.redeem đã chạy, hoàn lại voucher trước khi rethrow
+      if (appliedVoucherId) {
+        try {
+          await voucherRedemptionService.release(appliedVoucherId, appointment.id, user, req);
+        } catch (releaseErr) {
+          console.error(`[createPaymentUrl] Không thể hoàn lại voucher ${appliedVoucherId}:`, releaseErr);
+        }
+      }
+      throw stepErr;
+    }
   }
 
   /**
@@ -388,29 +407,100 @@ class PaymentService {
       // 6. Chuyển trạng thái Appointment qua appointmentStateService
       const appointment = await Appointment.findOne({ id: transaction.appointmentId });
       if (appointment) {
-        const isOnline = appointment.type === 'ONLINE';
-        const targetState = isOnline
-          ? env.paymentSuccessTargetStateOnline || 'CONFIRMED'
-          : env.paymentSuccessTargetStateOffline || 'PENDING_CONFIRMATION';
-
-        try {
-          await appointmentStateService.transition({
-            appointmentId: appointment.id,
-            fromStatus: APPOINTMENT_STATUSES.PENDING_PAYMENT,
-            toStatus: targetState,
+        // Nếu lịch đã CANCELLED hoặc EXPIRED khi tiền về: đánh dấu needsReconcile và refundRequired=true trên lịch, audit, không cố CONFIRMED
+        if (
+          appointment.status === APPOINTMENT_STATUSES.CANCELLED ||
+          appointment.status === APPOINTMENT_STATUSES.EXPIRED
+        ) {
+          await Appointment.updateOne(
+            { id: appointment.id },
+            { $set: { refundRequired: true, paymentStatus: PAYMENT_STATUSES.SUCCESS } },
+          );
+          await PaymentTransaction.updateOne(
+            { id: transaction.id },
+            { $set: { needsReconcile: true } },
+          );
+          await auditService.log({
             actor: {
               userId: transaction.userId || appointment.patientId,
               role: 'SYSTEM',
               email: 'system@clinicbooking.local',
             },
-            extraFields: {
-              paymentStatus: PAYMENT_STATUSES.SUCCESS,
-              paidAmount: transaction.amount,
+            action: AUDIT_ACTIONS.PAYMENT_STATE_SYNC_FAILED,
+            resource: {
+              type: 'Appointment',
+              id: appointment.id,
             },
-            options: { req },
+            reason: `Tiền về khi lịch hẹn #${appointment.id} đã ở trạng thái ${appointment.status}. Đánh dấu refundRequired=true và needsReconcile=true.`,
+            changes: {
+              appointmentId: appointment.id,
+              transactionNo: transaction.transactionNo,
+              appointmentStatus: appointment.status,
+              refundRequired: true,
+            },
+            req,
           });
-        } catch (transitionErr) {
-          // Log warning if transition was already in target state
+        } else {
+          const isOnline = appointment.type === 'ONLINE';
+          const targetState = isOnline
+            ? env.paymentSuccessTargetStateOnline || 'CONFIRMED'
+            : env.paymentSuccessTargetStateOffline || 'PENDING_CONFIRMATION';
+
+          if (appointment.status !== targetState) {
+            try {
+              await appointmentStateService.transition({
+                appointmentId: appointment.id,
+                fromStatus: appointment.status,
+                toStatus: targetState,
+                actor: {
+                  userId: transaction.userId || appointment.patientId,
+                  role: 'SYSTEM',
+                  email: 'system@clinicbooking.local',
+                },
+                extraFields: {
+                  paymentStatus: 'PAID',
+                  paidAmount: transaction.amount,
+                },
+                options: { req },
+              });
+            } catch (transitionErr) {
+              console.error(
+                `[processVNPayCallback] Lỗi chuyển trạng thái lịch hẹn #${appointment.id} (transactionNo: ${transaction.transactionNo}):`,
+                transitionErr.message,
+              );
+              // Set needsReconcile=true trên transaction và ghi audit PAYMENT_STATE_SYNC_FAILED
+              await PaymentTransaction.updateOne(
+                { id: transaction.id },
+                { $set: { needsReconcile: true } },
+              );
+              await auditService.log({
+                actor: {
+                  userId: transaction.userId || appointment.patientId,
+                  role: 'SYSTEM',
+                  email: 'system@clinicbooking.local',
+                },
+                action: AUDIT_ACTIONS.PAYMENT_STATE_SYNC_FAILED,
+                resource: {
+                  type: 'Appointment',
+                  id: appointment.id,
+                },
+                reason: `Không thể chuyển trạng thái lịch hẹn #${appointment.id} sang ${targetState} sau khi thanh toán thành công: ${transitionErr.message}`,
+                changes: {
+                  appointmentId: appointment.id,
+                  transactionNo: transaction.transactionNo,
+                  targetState,
+                  error: transitionErr.message,
+                },
+                req,
+              });
+            }
+          } else {
+            // Lịch đã ở đúng targetState, chỉ cập nhật paymentStatus nếu cần
+            await Appointment.updateOne(
+              { id: appointment.id },
+              { $set: { paymentStatus: PAYMENT_STATUSES.SUCCESS } },
+            );
+          }
         }
       }
 

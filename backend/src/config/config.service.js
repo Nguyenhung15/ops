@@ -201,7 +201,25 @@ class ConfigService {
   }
 
   get vnpIpnUrl() {
-    return this.getString('VNP_IPN_URL', 'http://localhost:3000/api/v1/payments/vnpay-ipn');
+    return this.getString('VNP_IPN_URL', 'http://localhost:3000/api/payments/vnpay-ipn');
+  }
+
+  get paymentAppointmentHoldMinutes() {
+    const hold = this.getNumber('PAYMENT_APPOINTMENT_HOLD_MINUTES', 30);
+    const ttl = this.paymentPendingTtlMinutes;
+    if (hold < ttl) {
+      console.warn(`[Config] PAYMENT_APPOINTMENT_HOLD_MINUTES (${hold}) nhỏ hơn PAYMENT_PENDING_TTL_MINUTES (${ttl}). Tự động nâng lên ${ttl} phút.`);
+      return ttl;
+    }
+    return hold;
+  }
+
+  get paymentJobEnabled() {
+    return this.getBoolean('PAYMENT_JOB_ENABLED', true);
+  }
+
+  get paymentJobIntervalMs() {
+    return this.getNumber('PAYMENT_JOB_INTERVAL_MS', 60000);
   }
 
   // --- Patient Feedback (UC-PAT-11 / UC-PAT-12) ---
@@ -257,6 +275,9 @@ class ConfigService {
       vnpUrl: this.vnpUrl,
       vnpReturnUrl: this.vnpReturnUrl,
       vnpIpnUrl: this.vnpIpnUrl,
+      paymentAppointmentHoldMinutes: this.paymentAppointmentHoldMinutes,
+      paymentJobEnabled: this.paymentJobEnabled,
+      paymentJobIntervalMs: this.paymentJobIntervalMs,
       feedbackEditDays: this.feedbackEditDays,
       feedbackRatePerHour: this.feedbackRatePerHour,
     };
