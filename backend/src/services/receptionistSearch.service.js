@@ -5,6 +5,7 @@ const { maskEmail, maskPhone } = require('../utils/masking');
 const { User, Voucher, UserVoucher } = require('../models');
 const { ROLES, AUDIT_ACTIONS } = require('../constants/enums');
 const { recordAudit } = require('./audit.service');
+const { getClock } = require('./clock.service');
 
 /**
  * Hash keyword for audit logging without storing raw PII
@@ -174,6 +175,12 @@ async function getUserVouchers(actor, targetUserId, req = null) {
 /**
  * Lễ tân / Admin đánh dấu sử dụng voucher tại quầy
  * POST /vouchers/:voucherId/use?userId=...
+ * Requirements:
+ * - Allowed roles: RECEPTIONIST, ADMIN
+ * - Atomic conditional update: used: false -> true (avoid race condition)
+ * - Validates target userId matches user voucher
+ * - Checks voucher is not expired or disabled
+ * - Audit log: USE_VOUCHER
  */
 async function markVoucherAsUsed(actor, userVoucherId, userId, req = null) {
   const allowedRoles = [ROLES.RECEPTIONIST, ROLES.ADMIN];
@@ -185,55 +192,113 @@ async function markVoucherAsUsed(actor, userVoucherId, userId, req = null) {
   const numVoucherId = Number(userVoucherId);
   const numUserId = Number(userId);
 
+  if (!Number.isSafeInteger(numUserId) || numUserId <= 0) {
+    throw new ApiError(400, 'Định danh người dùng không hợp lệ', 'INVALID_USER_ID');
+  }
+
+  if (!Number.isSafeInteger(numVoucherId) || numVoucherId <= 0) {
+    throw new ApiError(400, 'Định danh voucher không hợp lệ', 'INVALID_VOUCHER_ID');
+  }
+
   const filter = {
     $or: [{ id: numVoucherId }, { voucherId: numVoucherId }],
     userId: numUserId,
   };
 
-  const userVoucher = await UserVoucher.findOne(filter);
-  if (!userVoucher) {
+  const existingUserVoucher = await UserVoucher.findOne(filter);
+  if (!existingUserVoucher) {
     throw new ApiError(404, 'Không tìm thấy voucher của người dùng', 'VOUCHER_NOT_FOUND');
   }
 
-  if (userVoucher.used) {
+  if (existingUserVoucher.used) {
     return {
-      id: userVoucher.id,
-      voucherId: userVoucher.voucherId,
-      voucherCode: userVoucher.voucherCode,
-      voucherName: userVoucher.voucherName,
+      id: existingUserVoucher.id,
+      voucherId: existingUserVoucher.voucherId,
+      voucherCode: existingUserVoucher.voucherCode,
+      voucherName: existingUserVoucher.voucherName,
       used: true,
-      usedAt: userVoucher.usedAt ? userVoucher.usedAt.toISOString() : null,
-      userId: userVoucher.userId,
+      usedAt: existingUserVoucher.usedAt ? existingUserVoucher.usedAt.toISOString() : null,
+      userId: existingUserVoucher.userId,
     };
   }
 
-  userVoucher.used = true;
-  userVoucher.usedAt = new Date();
-  await userVoucher.save();
+  const now = getClock().now();
+
+  // Check expiration if expiryDate is defined
+  if (existingUserVoucher.expiryDate && new Date(existingUserVoucher.expiryDate) < now) {
+    throw new ApiError(400, 'Voucher đã hết hạn sử dụng', 'VOUCHER_EXPIRED');
+  }
+
+  // Check parent voucher if disabled or expired
+  if (existingUserVoucher.voucherId) {
+    const parentVoucher = await Voucher.findOne({ id: existingUserVoucher.voucherId }).lean();
+
+    if (parentVoucher) {
+      if (parentVoucher.enable === false) {
+        throw new ApiError(400, 'Voucher đã bị vô hiệu hóa', 'VOUCHER_DISABLED');
+      }
+      if (parentVoucher.expiryDate && new Date(parentVoucher.expiryDate) < now) {
+        throw new ApiError(400, 'Voucher đã hết hạn sử dụng', 'VOUCHER_EXPIRED');
+      }
+    }
+  }
+
+  // Atomic conditional update (used: false -> true) to eliminate race conditions
+  const updatedUserVoucher = await UserVoucher.findOneAndUpdate(
+    {
+      _id: existingUserVoucher._id,
+      used: false,
+    },
+    {
+      $set: {
+        used: true,
+        usedAt: now,
+      },
+    },
+    { returnDocument: 'after' },
+  );
+
+  if (!updatedUserVoucher) {
+    // If concurrent update already marked it used, fetch current document
+    const refreshed = await UserVoucher.findById(existingUserVoucher._id).lean();
+    if (refreshed && refreshed.used) {
+      return {
+        id: refreshed.id,
+        voucherId: refreshed.voucherId,
+        voucherCode: refreshed.voucherCode,
+        voucherName: refreshed.voucherName,
+        used: true,
+        usedAt: refreshed.usedAt ? refreshed.usedAt.toISOString() : null,
+        userId: refreshed.userId,
+        isConcurrentConflict: true,
+      };
+    }
+    throw new ApiError(409, 'Voucher đã được sử dụng', 'VOUCHER_ALREADY_USED');
+  }
 
   await recordAudit({
     actor,
     action: AUDIT_ACTIONS.USE_VOUCHER,
     targetType: 'UserVoucher',
-    targetId: userVoucher.id,
-    reason: `Sử dụng voucher #${userVoucher.voucherCode} cho người dùng #${numUserId}`,
+    targetId: updatedUserVoucher.id,
+    reason: `Sử dụng voucher #${updatedUserVoucher.voucherCode} cho người dùng #${numUserId}`,
     changes: {
-      voucherId: userVoucher.voucherId,
+      voucherId: updatedUserVoucher.voucherId,
       userId: numUserId,
       used: true,
-      usedAt: userVoucher.usedAt.toISOString(),
+      usedAt: updatedUserVoucher.usedAt ? updatedUserVoucher.usedAt.toISOString() : now.toISOString(),
     },
     req,
   });
 
   return {
-    id: userVoucher.id,
-    voucherId: userVoucher.voucherId,
-    voucherCode: userVoucher.voucherCode,
-    voucherName: userVoucher.voucherName,
+    id: updatedUserVoucher.id,
+    voucherId: updatedUserVoucher.voucherId,
+    voucherCode: updatedUserVoucher.voucherCode,
+    voucherName: updatedUserVoucher.voucherName,
     used: true,
-    usedAt: userVoucher.usedAt.toISOString(),
-    userId: userVoucher.userId,
+    usedAt: updatedUserVoucher.usedAt ? updatedUserVoucher.usedAt.toISOString() : now.toISOString(),
+    userId: updatedUserVoucher.userId,
   };
 }
 
