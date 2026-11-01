@@ -272,8 +272,27 @@ describe('UC-PAT-07: Patient vào khám online (POST /appointments/:id/join-onli
   });
 
   it('4. Trạng thái không hợp lệ (PENDING_PAYMENT, CANCELLED, COMPLETED) -> 409', async () => {
+    // 4a. PENDING_PAYMENT trả về 409 PAYMENT_REQUIRED
+    const pendingPaymentAppt = await Appointment.create({
+      appointmentNo: 'ONL70004_PENDING_PAYMENT',
+      patientId: patient1.id,
+      doctorId: doctor1.id,
+      specialtyId: 1,
+      shiftId: 1,
+      slotIds: [4],
+      appointmentDate: '2026-11-05',
+      appointmentTime: '09:00',
+      type: 'ONLINE',
+      status: APPOINTMENT_STATUSES.PENDING_PAYMENT,
+    });
+    const resPendingPayment = await apiRequest('POST', `/api/appointments/${pendingPaymentAppt.id}/join-online`, {
+      token: patient1Token,
+    });
+    assert.equal(resPendingPayment.status, 409);
+    assert.equal(resPendingPayment.body.error?.code, 'PAYMENT_REQUIRED');
+
+    // 4b. Các trạng thái khác trả về INVALID_APPOINTMENT_STATUS
     const invalidStatuses = [
-      APPOINTMENT_STATUSES.PENDING_PAYMENT,
       APPOINTMENT_STATUSES.PENDING_CONFIRMATION,
       APPOINTMENT_STATUSES.CANCELLED,
       APPOINTMENT_STATUSES.COMPLETED,
@@ -367,6 +386,7 @@ describe('UC-PAT-07: Patient vào khám online (POST /appointments/:id/join-onli
       appointmentTime: '09:00',
       type: 'ONLINE',
       status: APPOINTMENT_STATUSES.CONFIRMED,
+      paymentStatus: 'PENDING',
     });
 
     // Không tạo PaymentTransaction SUCCESS
