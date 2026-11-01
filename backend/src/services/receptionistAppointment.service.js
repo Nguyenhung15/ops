@@ -1,6 +1,7 @@
 const { Appointment, DoctorShift, User, Specialty } = require('../models');
 const { ROLES, APPOINTMENT_STATUSES, AUDIT_ACTIONS } = require('../constants/enums');
 const { appointmentStateService } = require('./appointmentState.service');
+const { holdSlot, releaseSlot } = require('./appointmentSlot.service');
 const { clock } = require('./clock.service');
 const ApiError = require('../utils/ApiError');
 
@@ -467,7 +468,12 @@ async function cancelAppointmentByStaff(actor, appointmentId, { reason } = {}) {
     if (PaymentTransaction) {
       const payment = await PaymentTransaction.findOne({
         appointmentId: appointment.id,
-        $or: [{ responseCode: '00' }, { transactionStatus: '00' }, { transactionStatus: 'SUCCESS' }],
+        $or: [
+          { status: 'SUCCESS' },
+          { responseCode: '00' },
+          { transactionStatus: '00' },
+          { transactionStatus: 'SUCCESS' },
+        ],
       }).lean();
       if (payment) {
         refundRequired = true;
@@ -481,27 +487,11 @@ async function cancelAppointmentByStaff(actor, appointmentId, { reason } = {}) {
   // ONLY release if slot belongs to this appointment (bookingRef matches appointmentNo)
   const slotIds = Array.isArray(appointment.slotIds) ? appointment.slotIds : [];
   if (appointment.shiftId && slotIds.length > 0) {
-    await DoctorShift.updateOne(
-      {
-        id: appointment.shiftId,
-        'slots.bookingRef': appointment.appointmentNo,
-      },
-      {
-        $set: {
-          'slots.$[elem].status': 'AVAILABLE',
-          'slots.$[elem].bookingRef': null,
-          'slots.$[elem].bookedAt': null,
-        },
-      },
-      {
-        arrayFilters: [
-          {
-            'elem.bookingRef': appointment.appointmentNo,
-            'elem.id': { $in: slotIds },
-          },
-        ],
-      },
-    );
+    await releaseSlot({
+      shiftId: appointment.shiftId,
+      slotIds,
+      bookingRef: appointment.appointmentNo,
+    });
   }
 
   // 8. Transition appointment state to CANCELLED via AppointmentStateService
@@ -519,6 +509,7 @@ async function cancelAppointmentByStaff(actor, appointmentId, { reason } = {}) {
     extraFields: {
       cancelReason: cleanReason,
       cancelledBy: actor.userId || actor.id,
+      cancelledByRole: actorRole,
       cancelledAt,
       refundRequired,
     },
@@ -534,6 +525,7 @@ async function cancelAppointmentByStaff(actor, appointmentId, { reason } = {}) {
         shiftId: appointment.shiftId,
         cancelReason: cleanReason,
         cancelledBy: actor.userId || actor.id,
+        cancelledByRole: actorRole,
         cancelledAt: cancelledAt.toISOString(),
         refundRequired,
       },
@@ -654,28 +646,14 @@ async function rescheduleAppointmentByStaff(
     }
   }
 
-  // 8. Atomic conditional reservation on new slot
+  // 8. Atomic conditional reservation on new slot using appointmentSlotService
   const crypto = require('crypto');
   const tempHoldRef = `HOLD_RESCHED_${crypto.randomBytes(4).toString('hex').toUpperCase()}`;
-  const reserveResult = await DoctorShift.updateOne(
-    {
-      id: newShift.id,
-      status: 'ACTIVE',
-      'slots.id': candidateSlot.id,
-      'slots.status': 'AVAILABLE',
-    },
-    {
-      $set: {
-        'slots.$.status': 'BOOKED',
-        'slots.$.bookingRef': tempHoldRef,
-        'slots.$.bookedAt': clock.now(),
-      },
-    },
-  );
-
-  if (reserveResult.modifiedCount !== 1) {
-    throw new ApiError(409, 'Slot khám đã có người đặt trước đó, vui lòng chọn slot khác', 'SLOT_ALREADY_BOOKED');
-  }
+  await holdSlot({
+    shiftId: newShift.id,
+    slotId: candidateSlot.id,
+    bookingRef: tempHoldRef,
+  });
 
   // Step 9: Compensation wrapper for appointment creation & state updates
   let newAppointment = null;
@@ -751,27 +729,11 @@ async function rescheduleAppointmentByStaff(
     // 9.4 Release old slot from old shift (only if slot belongs to this old appointment)
     const oldSlotIds = Array.isArray(oldAppointment.slotIds) ? oldAppointment.slotIds : [];
     if (oldAppointment.shiftId && oldSlotIds.length > 0) {
-      await DoctorShift.updateOne(
-        {
-          id: oldAppointment.shiftId,
-          'slots.bookingRef': oldAppointment.appointmentNo,
-        },
-        {
-          $set: {
-            'slots.$[elem].status': 'AVAILABLE',
-            'slots.$[elem].bookingRef': null,
-            'slots.$[elem].bookedAt': null,
-          },
-        },
-        {
-          arrayFilters: [
-            {
-              'elem.bookingRef': oldAppointment.appointmentNo,
-              'elem.id': { $in: oldSlotIds },
-            },
-          ],
-        },
-      );
+      await releaseSlot({
+        shiftId: oldAppointment.shiftId,
+        slotIds: oldSlotIds,
+        bookingRef: oldAppointment.appointmentNo,
+      });
     }
 
     // 9.5 Outbox event after commit
@@ -796,20 +758,18 @@ async function rescheduleAppointmentByStaff(
   } catch (err) {
     // COMPENSATION ROLLBACK: Revert the reserved slot back to AVAILABLE
     try {
-      await DoctorShift.updateOne(
-        {
-          id: newShift.id,
-          'slots.id': candidateSlot.id,
-          'slots.bookingRef': { $in: [tempHoldRef, newAppointmentNo] },
-        },
-        {
-          $set: {
-            'slots.$.status': 'AVAILABLE',
-            'slots.$.bookingRef': null,
-            'slots.$.bookedAt': null,
-          },
-        },
-      );
+      await releaseSlot({
+        shiftId: newShift.id,
+        slotIds: [candidateSlot.id],
+        bookingRef: tempHoldRef,
+      });
+      if (newAppointment && newAppointment.appointmentNo) {
+        await releaseSlot({
+          shiftId: newShift.id,
+          slotIds: [candidateSlot.id],
+          bookingRef: newAppointment.appointmentNo,
+        });
+      }
       // Clean up new appointment document if it was created
       if (newAppointment && newAppointment._id) {
         await Appointment.deleteOne({ _id: newAppointment._id });
