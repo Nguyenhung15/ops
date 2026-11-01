@@ -36,6 +36,14 @@ const eventSchema = new mongoose.Schema(
       default: null,
       index: true,
     },
+    capacity: {
+      type: Number,
+      default: null,
+    },
+    registeredCount: {
+      type: Number,
+      default: 0,
+    },
   },
   {
     timestamps: true,

@@ -1,6 +1,8 @@
 const mongoose = require('mongoose');
 const baseSchemaPlugin = require('./plugins/baseSchema.plugin');
 
+const { PAYMENT_STATUSES } = require('../constants/enums');
+
 const paymentTransactionSchema = new mongoose.Schema(
   {
     appointmentId: {
@@ -8,9 +10,33 @@ const paymentTransactionSchema = new mongoose.Schema(
       required: true,
       index: true,
     },
-    amount: {
+    userId: {
+      type: Number,
+      default: null,
+      index: true,
+    },
+    transactionNo: {
       type: String,
       default: null,
+    },
+    amount: {
+      type: mongoose.Schema.Types.Mixed, // integer number or legacy string
+      default: null,
+    },
+    discountAmount: {
+      type: Number,
+      default: 0,
+    },
+    userVoucherId: {
+      type: Number,
+      default: null,
+      index: true,
+    },
+    status: {
+      type: String,
+      enum: Object.values(PAYMENT_STATUSES),
+      default: PAYMENT_STATUSES.PENDING,
+      index: true,
     },
     bankCode: {
       type: String,
@@ -24,11 +50,11 @@ const paymentTransactionSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
-    responseCode: {
-      type: String,
+    expiresAt: {
+      type: Date,
       default: null,
     },
-    transactionNo: {
+    responseCode: {
       type: String,
       default: null,
     },
@@ -40,6 +66,15 @@ const paymentTransactionSchema = new mongoose.Schema(
   {
     timestamps: true,
   },
+);
+
+// Compound index on appointmentId and status
+paymentTransactionSchema.index({ appointmentId: 1, status: 1 });
+
+// Partial unique index on transactionNo to allow multiple null/pending entries while guarding duplicates
+paymentTransactionSchema.index(
+  { transactionNo: 1 },
+  { unique: true, partialFilterExpression: { transactionNo: { $type: 'string', $gt: '' } } },
 );
 
 paymentTransactionSchema.plugin(baseSchemaPlugin, {

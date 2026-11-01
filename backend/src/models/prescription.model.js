@@ -25,6 +25,10 @@ const prescriptionSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    version: {
+      type: Number,
+      default: 1,
+    },
   },
   {
     timestamps: true,

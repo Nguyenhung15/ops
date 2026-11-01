@@ -134,6 +134,16 @@ const appointmentSchema = new mongoose.Schema(
       type: String,
       default: null,
     },
+    meeting: {
+      url: { type: String, default: null },
+      code: { type: String, default: null },
+      createdAt: { type: Date, default: null },
+    },
+    paymentStatus: {
+      type: String,
+      default: null,
+      index: true,
+    },
     patients: {
       type: [appointmentPatientSnapshotSchema],
       default: [],

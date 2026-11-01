@@ -154,6 +154,65 @@ class ConfigService {
     return this.getNumber('RECEPTION_SEARCH_RATE_PER_MIN', 30);
   }
 
+  // --- Online Consultation (UC-PAT-09 / UC-PAT-10) ---
+  get joinEarlyMinutes() {
+    return this.getNumber('JOIN_EARLY_MINUTES', 15);
+  }
+
+  get joinLateGraceMinutes() {
+    return this.getNumber('JOIN_LATE_GRACE_MINUTES', 15);
+  }
+
+  get onlineRequirePaymentBeforeJoin() {
+    return this.getBoolean('ONLINE_REQUIRE_PAYMENT_BEFORE_JOIN', true);
+  }
+
+  get joinTokenSecret() {
+    return this.getString('JOIN_TOKEN_SECRET', '');
+  }
+
+  // --- Payment & VNPay (UC-PAT-07 / UC-PAT-08) ---
+  get paymentPendingTtlMinutes() {
+    return this.getNumber('PAYMENT_PENDING_TTL_MINUTES', 15);
+  }
+
+  get paymentSuccessTargetStateOnline() {
+    return this.getString('PAYMENT_SUCCESS_TARGET_STATE_ONLINE', 'CONFIRMED');
+  }
+
+  get paymentSuccessTargetStateOffline() {
+    return this.getString('PAYMENT_SUCCESS_TARGET_STATE_OFFLINE', 'PENDING_CONFIRMATION');
+  }
+
+  get vnpTmnCode() {
+    return this.getString('VNP_TMN_CODE', '');
+  }
+
+  get vnpHashSecret() {
+    return this.getString('VNP_HASH_SECRET', '');
+  }
+
+  get vnpUrl() {
+    return this.getString('VNP_URL', 'https://sandbox.vnpayment.vn/paymentv2/vpcpay.html');
+  }
+
+  get vnpReturnUrl() {
+    return this.getString('VNP_RETURN_URL', 'http://localhost:5173/payment/vnpay-return');
+  }
+
+  get vnpIpnUrl() {
+    return this.getString('VNP_IPN_URL', 'http://localhost:3000/api/v1/payments/vnpay-ipn');
+  }
+
+  // --- Patient Feedback (UC-PAT-11 / UC-PAT-12) ---
+  get feedbackEditDays() {
+    return this.getNumber('FEEDBACK_EDIT_DAYS', 7);
+  }
+
+  get feedbackRatePerHour() {
+    return this.getNumber('FEEDBACK_RATE_PER_HOUR', 10);
+  }
+
   /**
    * Export config snapshot object for backwards compatibility.
    */
@@ -186,6 +245,20 @@ class ConfigService {
       checkinEarlyMinutes: this.checkinEarlyMinutes,
       shiftCancelPolicy: this.shiftCancelPolicy,
       receptionSearchRatePerMin: this.receptionSearchRatePerMin,
+      joinEarlyMinutes: this.joinEarlyMinutes,
+      joinLateGraceMinutes: this.joinLateGraceMinutes,
+      onlineRequirePaymentBeforeJoin: this.onlineRequirePaymentBeforeJoin,
+      joinTokenSecret: this.joinTokenSecret,
+      paymentPendingTtlMinutes: this.paymentPendingTtlMinutes,
+      paymentSuccessTargetStateOnline: this.paymentSuccessTargetStateOnline,
+      paymentSuccessTargetStateOffline: this.paymentSuccessTargetStateOffline,
+      vnpTmnCode: this.vnpTmnCode,
+      vnpHashSecret: this.vnpHashSecret,
+      vnpUrl: this.vnpUrl,
+      vnpReturnUrl: this.vnpReturnUrl,
+      vnpIpnUrl: this.vnpIpnUrl,
+      feedbackEditDays: this.feedbackEditDays,
+      feedbackRatePerHour: this.feedbackRatePerHour,
     };
   }
 }

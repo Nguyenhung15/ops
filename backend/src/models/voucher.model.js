@@ -18,6 +18,11 @@ const voucherSchema = new mongoose.Schema(
       type: Number,
       default: null,
     },
+    discountType: {
+      type: String,
+      enum: ['AMOUNT', 'PERCENT'],
+      default: 'AMOUNT',
+    },
     type: {
       type: String,
       enum: ['SERVICE_TICKET', 'DISCOUNT'],
@@ -87,6 +92,11 @@ const userVoucherSchema = new mongoose.Schema(
     usedAt: {
       type: Date,
       default: null,
+    },
+    appointmentId: {
+      type: Number,
+      default: null,
+      index: true,
     },
   },
   {

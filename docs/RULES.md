@@ -141,3 +141,23 @@ Toàn bộ các thay đổi trạng thái của Lịch hẹn (`Appointment`) **b
 2. **Rate Limiting:**
    - Bổ sung middleware giới hạn tần suất gọi API tái sử dụng được, định danh theo `userId` (nếu đã đăng nhập) hoặc `clientIp` (nếu là khách).
    - Cấu hình linh hoạt qua biến môi trường.
+
+---
+
+## 8. QUY ƯỚC FILE & GIT (FILE & GIT CONVENTIONS)
+
+### 8.1. Luật File (File Modification Rules)
+1. **Lần sửa chung duy nhất (PREP):** Giai đoạn PREP là lần duy nhất được phép bổ sung/sửa đổi các file dùng chung (`constants/enums.js`, `config/config.service.js`, `.env.example`, `models/*`, `routes/index.js`, `package.json`, `docs/*`).
+2. **Các UC tiếp theo chỉ TẠO FILE MỚI:**
+   - Các use case tiếp theo (UC-PAT-07..12) tuyệt đối **KHÔNG SỬA FILE DÙNG CHUNG**.
+   - Mọi router nghiệp vụ mới phải đặt trong thư mục `src/routes/features/*.routes.js` và export `{ basePath, router }`. Dynamic loader trong `src/routes/index.js` sẽ tự động quét và mount trước các router cũ.
+   - Các service, controller, test mới viết thành file riêng tương ứng với mã use case.
+3. **Nguyên tắc bảo toàn:** Giữ nguyên kiểu xuống dòng của từng file, không reformat hàng loạt, mọi field mới trong model là optional.
+
+### 8.2. Quy trình Git (Git Push Workflow)
+1. **Làm việc trực tiếp trên nhánh `main`:** Push thẳng vào `main` theo yêu cầu của dự án, không tạo thêm Pull Request rườm rà.
+2. **Luôn kéo code mới nhất trước khi làm việc:** `git pull origin main`.
+3. **Commit rõ ràng & kiểm tra chất lượng trước khi push:**
+   - Chạy `npm run lint` và `npm test` đảm bảo 100% xanh trước khi commit.
+   - Định dạng commit theo Conventional Commits: `feat(scope): implement UC-...`
+   - Đẩy code an toàn: `git push origin main`.

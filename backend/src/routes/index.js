@@ -1,3 +1,5 @@
+const fs = require('fs');
+const path = require('path');
 const { Router } = require('express');
 const { getHealth } = require('../controllers/health.controller');
 const authRoutes = require('./auth.routes');
@@ -23,6 +25,26 @@ const voucherRoutes = require('./voucher.routes');
 
 const router = Router();
 
+// --- 1. Dynamic Features Loader (Mount FIRST so Patient feature routes aren't blocked by role guards) ---
+const featuresDir = path.join(__dirname, 'features');
+if (fs.existsSync(featuresDir)) {
+  const featureFiles = fs
+    .readdirSync(featuresDir)
+    .filter((file) => file.endsWith('.routes.js'))
+    .sort();
+
+  for (const file of featureFiles) {
+    const featureModule = require(path.join(featuresDir, file));
+    const basePath = featureModule.basePath || featureModule.prefix;
+    const featureRouter = featureModule.router || featureModule.default;
+
+    if (basePath && featureRouter) {
+      router.use(basePath, featureRouter);
+    }
+  }
+}
+
+// --- 2. Core & Legacy Routers ---
 router.get('/health', getHealth);
 router.use('/auth', authRoutes);
 router.use('/users', userRoutes);

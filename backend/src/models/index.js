@@ -18,6 +18,7 @@ const OutboxEvent = require('./outboxEvent.model');
 const Event = require('./event.model');
 const EventRegistration = require('./eventRegistration.model');
 const { Voucher, UserVoucher } = require('./voucher.model');
+const Feedback = require('./feedback.model');
 
 module.exports = {
   Counter,
@@ -43,5 +44,6 @@ module.exports = {
   EventRegistration,
   Voucher,
   UserVoucher,
+  Feedback,
 };
 
