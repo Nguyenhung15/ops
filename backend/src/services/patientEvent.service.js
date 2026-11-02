@@ -15,7 +15,6 @@ async function getAvailableEvents(user = null) {
 
   const filter = {
     isEnabled: true,
-    startDate: { $lte: now },
     endDate: { $gte: now },
   };
 
@@ -89,8 +88,8 @@ async function registerEvent(actor, eventId, req = null) {
 
   const now = clock.now();
 
-  // Kiểm tra sự kiện đang mở (isEnabled = true, startDate <= now <= endDate)
-  if (!event.isEnabled || (event.startDate && event.startDate > now) || (event.endDate && event.endDate < now)) {
+  // Kiểm tra sự kiện đang mở (isEnabled = true, now <= endDate)
+  if (!event.isEnabled || (event.endDate && event.endDate < now)) {
     throw new ApiError(409, 'Sự kiện đã kết thúc hoặc tạm đóng đăng ký', 'EVENT_CLOSED');
   }
 
@@ -137,7 +136,7 @@ async function registerEvent(actor, eventId, req = null) {
       registeredAt: now,
     });
   } catch (error) {
-    // Hoàn tác capacity nếu lưu registration thất bại
+    // Hoàn tác capacity nếu lưu registration thất bại (đảm bảo không âm)
     if (capacityReserved) {
       await Event.updateOne(
         { id: numEventId, registeredCount: { $gt: 0 } },
@@ -145,8 +144,8 @@ async function registerEvent(actor, eventId, req = null) {
       );
     }
 
-    // Bắt lỗi trùng lặp từ unique index (E11000)
-    if (error.code === 11000 || error.name === 'MongoServerError') {
+    // Chỉ bắt lỗi trùng lặp từ unique index khi error.code === 11000
+    if (error && error.code === 11000) {
       throw new ApiError(409, 'Bạn đã đăng ký sự kiện này trước đó', 'ALREADY_REGISTERED');
     }
     throw error;

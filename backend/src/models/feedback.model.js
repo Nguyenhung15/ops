@@ -92,6 +92,12 @@ const feedbackSchema = new mongoose.Schema(
   },
 );
 
+// Partial unique index: each appointment can only have one active feedback per user (deletedAt == null)
+feedbackSchema.index(
+  { appointmentId: 1, userId: 1 },
+  { unique: true, partialFilterExpression: { deletedAt: null } },
+);
+
 feedbackSchema.plugin(baseSchemaPlugin, {
   sequenceName: 'feedbacks',
   extraTransform: (_doc, ret) => {

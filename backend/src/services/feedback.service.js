@@ -13,6 +13,8 @@ const {
 const ApiError = require('../utils/ApiError');
 const { parsePositiveInt } = require('../utils/normalizers');
 const { recordAudit } = require('./audit.service');
+const { clock } = require('./clock.service');
+const { configService } = require('../config/config.service');
 
 /**
  * Sanitize plain text để loại bỏ hoàn toàn các thẻ HTML, script, style nhằm chống XSS.
@@ -72,8 +74,11 @@ function serializeFeedback(doc, authorUser, viewer = null, isAdmin = false) {
     isOwner,
   };
 
-  if (isAdmin) {
+  if (isAdmin || isOwner) {
     result.status = f.status;
+  }
+
+  if (isAdmin) {
     result.adminRespondedBy = f.adminRespondedBy ?? null;
     result.moderatedBy = f.moderatedBy ?? null;
     result.moderatedAt = f.moderatedAt instanceof Date ? f.moderatedAt.toISOString() : (f.moderatedAt || null);
@@ -170,17 +175,53 @@ class FeedbackService {
       docDoctorId = appointment.doctorId || null;
     }
 
-    const created = await Feedback.create({
-      userId,
-      appointmentId: numApptId,
-      doctorId: docDoctorId,
-      rating: numRating,
-      title: cleanTitle,
-      comment: cleanComment,
-      category: cleanCategory,
-      isAnonymous: anonymousFlag,
-      status: FEEDBACK_STATUSES.APPROVED,
-    });
+    const initialStatus = numApptId ? FEEDBACK_STATUSES.PENDING : FEEDBACK_STATUSES.APPROVED;
+
+    let created;
+    try {
+      created = await Feedback.create({
+        userId,
+        appointmentId: numApptId,
+        doctorId: docDoctorId,
+        rating: numRating,
+        title: cleanTitle,
+        comment: cleanComment,
+        category: cleanCategory,
+        isAnonymous: anonymousFlag,
+        status: initialStatus,
+        deletedAt: null,
+      });
+    } catch (err) {
+      if (err && err.code === 11000) {
+        throw new ApiError(409, 'Bạn đã gửi đánh giá cho lịch hẹn này rồi', 'FEEDBACK_EXISTS');
+      }
+      throw err;
+    }
+
+    // Ghi audit CREATE_FEEDBACK
+    try {
+      await recordAudit({
+        actor: {
+          id: userId,
+          userId,
+          role: user.userType || user.role || ROLES.PATIENT,
+          email: user.email,
+        },
+        action: AUDIT_ACTIONS.CREATE_FEEDBACK || 'CREATE_FEEDBACK',
+        targetType: 'Feedback',
+        targetId: created.id,
+        reason: `Bệnh nhân #${userId} gửi phản hồi #${created.id}`,
+        changes: {
+          feedbackId: created.id,
+          appointmentId: numApptId,
+          rating: numRating,
+          status: created.status,
+        },
+        req,
+      });
+    } catch (auditErr) {
+      // Non-blocking audit failure
+    }
 
     const author = await User.findOne({ id: userId }).select('id fullName email').lean();
     return serializeFeedback(created, author, user);
@@ -217,18 +258,34 @@ class FeedbackService {
     const id = parsePositiveInt(feedbackId, 'Feedback ID');
     const feedback = await Feedback.findOne({ id, deletedAt: null });
     if (!feedback) {
-      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`);
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`, 'FEEDBACK_NOT_FOUND');
     }
 
     const userId = Number(user.id || user.userId);
-    if (Number(feedback.userId) !== userId) {
-      throw new ApiError(403, 'Bạn không có quyền chỉnh sửa đánh giá này');
+    const isAdmin = user && (user.userType === 'Admin' || user.role === 'Admin');
+    if (!isAdmin && Number(feedback.userId) !== userId) {
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`, 'FEEDBACK_NOT_FOUND');
+    }
+
+    // Kiểm tra thời hạn sửa (nếu là bệnh nhân)
+    const now = clock.now();
+    if (!isAdmin) {
+      const editDaysAllowed = configService.feedbackEditDays || 7;
+      const createdAtTime = new Date(feedback.createdAt).getTime();
+      const elapsedDays = (now.getTime() - createdAtTime) / (1000 * 60 * 60 * 24);
+      if (elapsedDays > editDaysAllowed) {
+        throw new ApiError(
+          409,
+          `Thời hạn chỉnh sửa phản hồi (${editDaysAllowed} ngày) đã kết thúc`,
+          'FEEDBACK_EDIT_WINDOW_CLOSED',
+        );
+      }
     }
 
     if (payload.rating !== undefined) {
       const numRating = Number(payload.rating);
       if (!Number.isInteger(numRating) || numRating < 1 || numRating > 5) {
-        throw new ApiError(400, 'rating phải là số nguyên từ 1 đến 5');
+        throw new ApiError(400, 'rating phải là số nguyên từ 1 đến 5', 'INVALID_RATING');
       }
       feedback.rating = numRating;
     }
@@ -236,7 +293,7 @@ class FeedbackService {
     if (payload.comment !== undefined) {
       const cleanComment = sanitizeComment(payload.comment, 2000);
       if (!cleanComment) {
-        throw new ApiError(400, 'Nội dung phản hồi không được để trống');
+        throw new ApiError(400, 'Nội dung phản hồi không được để trống', 'EMPTY_COMMENT');
       }
       feedback.comment = cleanComment;
     }
@@ -253,8 +310,38 @@ class FeedbackService {
       feedback.isAnonymous = Boolean(payload.isAnonymous);
     }
 
+    // Nếu sửa bản PUBLISHED thì tự động quay về PENDING
+    if (feedback.status === FEEDBACK_STATUSES.PUBLISHED) {
+      feedback.status = FEEDBACK_STATUSES.PENDING;
+    }
+
     await feedback.save();
-    const author = await User.findOne({ id: userId }).select('id fullName email').lean();
+
+    // Ghi Audit UPDATE_FEEDBACK
+    try {
+      await recordAudit({
+        actor: {
+          id: userId,
+          userId,
+          role: user.userType || user.role || 'PATIENT',
+          email: user.email,
+        },
+        action: AUDIT_ACTIONS.UPDATE_FEEDBACK || 'UPDATE_FEEDBACK',
+        targetType: 'Feedback',
+        targetId: feedback.id,
+        reason: `Người dùng #${userId} cập nhật phản hồi #${feedback.id}`,
+        changes: {
+          feedbackId: feedback.id,
+          newStatus: feedback.status,
+          rating: feedback.rating,
+        },
+        req,
+      });
+    } catch (auditErr) {
+      // Non-blocking
+    }
+
+    const author = await User.findOne({ id: feedback.userId }).select('id fullName email').lean();
     return serializeFeedback(feedback, author, user);
   }
 
@@ -265,29 +352,111 @@ class FeedbackService {
   async deleteFeedback(actor, idParam, req = null) {
     const id = parsePositiveInt(idParam, 'Feedback ID');
     const feedback = await Feedback.findOne({ id });
-    if (!feedback || (feedback.deletedAt && actor?.userType !== 'Admin')) {
-      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`);
+    const isAdmin = actor && (actor.userType === 'Admin' || actor.role === 'Admin');
+
+    if (!feedback || (feedback.deletedAt && !isAdmin)) {
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`, 'FEEDBACK_NOT_FOUND');
     }
 
-    const isAdmin = actor && (actor.userType === 'Admin' || actor.role === 'Admin');
     const isOwner = actor && Number(actor.id || actor.userId) === Number(feedback.userId);
 
     if (!isAdmin && !isOwner) {
-      throw new ApiError(403, 'Bạn không có quyền xóa đánh giá này');
+      throw new ApiError(404, `Không tìm thấy đánh giá #${id}`, 'FEEDBACK_NOT_FOUND');
     }
+
+    const now = clock.now();
 
     if (isAdmin) {
       await Feedback.deleteOne({ id });
     } else {
-      feedback.deletedAt = new Date();
+      // Kiểm tra thời hạn xóa
+      const editDaysAllowed = configService.feedbackEditDays || 7;
+      const createdAtTime = new Date(feedback.createdAt).getTime();
+      const elapsedDays = (now.getTime() - createdAtTime) / (1000 * 60 * 60 * 24);
+      if (elapsedDays > editDaysAllowed) {
+        throw new ApiError(
+          409,
+          `Thời hạn xóa phản hồi (${editDaysAllowed} ngày) đã kết thúc`,
+          'FEEDBACK_EDIT_WINDOW_CLOSED',
+        );
+      }
+
+      feedback.deletedAt = now;
       await feedback.save();
+    }
+
+    // Ghi Audit DELETE_FEEDBACK
+    try {
+      await recordAudit({
+        actor: {
+          id: actor.id || actor.userId,
+          userId: actor.id || actor.userId,
+          role: actor.userType || actor.role,
+          email: actor.email,
+        },
+        action: AUDIT_ACTIONS.DELETE_FEEDBACK || 'DELETE_FEEDBACK',
+        targetType: 'Feedback',
+        targetId: feedback.id,
+        reason: `Người dùng xóa phản hồi #${feedback.id}`,
+        changes: {
+          feedbackId: feedback.id,
+          appointmentId: feedback.appointmentId,
+        },
+        req,
+      });
+    } catch (auditErr) {
+      // Non-blocking
     }
 
     return {
       success: true,
       deleted: true,
       message: 'Xóa đánh giá thành công',
+      id: feedback.id,
     };
+  }
+
+  async getPublishedAnonymous(query = {}) {
+    const filter = {
+      status: FEEDBACK_STATUSES.PUBLISHED,
+      deletedAt: null,
+    };
+
+    const page = Math.max(1, Number(query.page) || 1);
+    const limit = Math.min(50, Math.max(1, Number(query.limit) || 10));
+    const skip = (page - 1) * limit;
+
+    const feedbacks = await Feedback.find(filter)
+      .sort({ createdAt: -1, id: -1 })
+      .skip(skip)
+      .limit(limit)
+      .lean();
+
+    const userIds = [...new Set(feedbacks.map((f) => f.userId).filter(Boolean))];
+    const users = await User.find({ id: { $in: userIds } })
+      .select('id fullName')
+      .lean();
+    const userMap = new Map(users.map((u) => [u.id, u.fullName]));
+
+    return feedbacks.map((fb) => {
+      const isAnon = Boolean(fb.isAnonymous);
+      const originalName = userMap.get(fb.userId) || 'Bệnh nhân';
+      const patientName = isAnon ? 'Ẩn danh' : maskName(originalName);
+
+      return {
+        id: fb.id,
+        // TUYỆT ĐỐI KHÔNG có userId hay patientEmail
+        patientName,
+        rating: fb.rating,
+        title: fb.title || undefined,
+        comment: fb.comment,
+        category: fb.category || undefined,
+        isAnonymous: isAnon,
+        adminResponse: fb.adminResponse || undefined,
+        adminRespondedAt: fb.adminRespondedAt ? new Date(fb.adminRespondedAt).toISOString() : undefined,
+        createdAt: fb.createdAt ? new Date(fb.createdAt).toISOString() : new Date().toISOString(),
+      };
+    });
   }
 
   async getPublicFeedbacks(query = {}, viewer = null) {
@@ -522,6 +691,7 @@ module.exports = {
   updateFeedback: feedbackService.updateFeedback.bind(feedbackService),
   updateFeedbackByOwner: feedbackService.updateFeedbackByOwner.bind(feedbackService),
   deleteFeedback: feedbackService.deleteFeedback.bind(feedbackService),
+  getPublishedAnonymous: feedbackService.getPublishedAnonymous.bind(feedbackService),
   getAllFeedbacksForAdmin: feedbackService.getAllFeedbacksForAdmin.bind(feedbackService),
   getFeedbackDetailForAdmin: feedbackService.getFeedbackDetailForAdmin.bind(feedbackService),
   respondToFeedback: feedbackService.respondToFeedback.bind(feedbackService),
