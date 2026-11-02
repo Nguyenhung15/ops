@@ -152,6 +152,10 @@ describe('UC-PAT-07: Patient vào khám online (POST /appointments/:id/join-onli
     await DoctorShift.deleteMany({});
     await PaymentTransaction.deleteMany({});
     await AuditLog.deleteMany({});
+    patient1Token = signAccessToken(patient1);
+    patient2Token = signAccessToken(patient2);
+    doctor1Token = signAccessToken(doctor1);
+    receptionist1Token = signAccessToken(receptionist1);
     fakeClock.setNow(new Date('2026-11-05T01:50:00.000Z')); // 08:50 GMT+7
     process.env.ONLINE_REQUIRE_PAYMENT_BEFORE_JOIN = 'true';
     process.env.JOIN_TOKEN_SECRET = 'uc_pat_07_test_join_token_secret_32chars_long';

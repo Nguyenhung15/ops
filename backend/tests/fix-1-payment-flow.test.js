@@ -30,6 +30,7 @@ const {
 const { ROLES, AUDIT_ACTIONS, APPOINTMENT_STATUSES, PAYMENT_STATUSES } = require('../src/constants/enums');
 const { signAccessToken } = require('../src/utils/jwt');
 const { setClock, createFakeClock } = require('../src/services/clock.service');
+const voucherRedemptionService = require('../src/services/voucherRedemption.service');
 const paymentMaintenanceJob = require('../src/jobs/paymentMaintenance.job');
 
 let server;
@@ -577,10 +578,40 @@ describe('FIX-1: Payment flow overhaul & reconciliation tests', () => {
 
       assert.equal(res.status, 500);
 
-      // Voucher phải được trả về used = false
+      // Voucher phải được trả về used = false và appointmentId = null sau rollback release
       const checkedUV = await UserVoucher.findOne({ id: userVoucher.id });
       assert.equal(checkedUV.used, false);
       assert.equal(checkedUV.appointmentId, null);
+
+      // Thử nghiệm trực tiếp: Redeem gắn appointmentId và release() kiểm tra đúng appointmentId
+      const redeemResult = await voucherRedemptionService.redeem(
+        { id: patient1.id, role: ROLES.PATIENT },
+        userVoucher.id,
+        { appointmentId: apptId, totalAmount: 150000 }
+      );
+      assert.equal(redeemResult.success, true);
+      const afterRedeemUV = await UserVoucher.findOne({ id: userVoucher.id });
+      assert.equal(afterRedeemUV.used, true);
+      assert.equal(afterRedeemUV.appointmentId, apptId);
+
+      // Release với appointmentId sai -> thất bại
+      await assert.rejects(
+        async () => {
+          await voucherRedemptionService.release(userVoucher.id, 999999, { id: patient1.id, role: ROLES.PATIENT });
+        },
+        { code: 'VOUCHER_APPOINTMENT_MISMATCH' }
+      );
+
+      // Release với appointmentId đúng -> thành công
+      const releaseResult = await voucherRedemptionService.release(
+        userVoucher.id,
+        apptId,
+        { id: patient1.id, role: ROLES.PATIENT }
+      );
+      assert.equal(releaseResult.success, true);
+      const afterReleaseUV = await UserVoucher.findOne({ id: userVoucher.id });
+      assert.equal(afterReleaseUV.used, false);
+      assert.equal(afterReleaseUV.appointmentId, null);
     } finally {
       PaymentTransaction.create = origCreate;
     }
