@@ -254,7 +254,7 @@ describe('UC-PAT-08: Patient đăng ký sự kiện (/events)', () => {
     assert.equal(resExpired.status, 409);
     assert.equal(resExpired.body.error?.code, 'EVENT_CLOSED');
 
-    // 4.3 Sự kiện chưa bắt đầu (startDate > now)
+    // 4.3 Sự kiện chưa bắt đầu (startDate > now, now <= endDate) -> Cho phép đăng ký trước (chính sách FIX-2)
     const futureEv = await Event.create({
       id: 904,
       title: 'Sự Kiện Chưa Bắt Đầu',
@@ -266,8 +266,8 @@ describe('UC-PAT-08: Patient đăng ký sự kiện (/events)', () => {
     const resFuture = await apiRequest('POST', `/events/${futureEv.id}/register`, {
       token: patient2Token,
     });
-    assert.equal(resFuture.status, 409);
-    assert.equal(resFuture.body.error?.code, 'EVENT_CLOSED');
+    assert.equal(resFuture.status, 201);
+    assert.equal(resFuture.body.data.eventId, futureEv.id);
   });
 
   it('5. Sự kiện hết chỗ -> 409 EVENT_FULL', async () => {
