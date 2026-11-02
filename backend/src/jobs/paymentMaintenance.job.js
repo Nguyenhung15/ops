@@ -1,6 +1,7 @@
 const Appointment = require('../models/appointment.model');
 const PaymentTransaction = require('../models/paymentTransaction.model');
 const DoctorShift = require('../models/doctorShift.model');
+const UserVoucher = require('../models/userVoucher.model');
 const { appointmentStateService } = require('../services/appointmentState.service');
 const appointmentSlotService = require('../services/appointmentSlot.service');
 const voucherRedemptionService = require('../services/voucherRedemption.service');
@@ -112,18 +113,21 @@ const runOnce = async () => {
             }
           }
 
-          // Release voucher nếu có transaction liên quan đến appointment này
+          // Release voucher nếu có voucher đang gắn và đang được dùng cho appointment này
           const txWithVoucher = await PaymentTransaction.findOne({
             appointmentId: appt.id,
             userVoucherId: { $ne: null },
           });
           if (txWithVoucher && txWithVoucher.userVoucherId) {
-            await voucherRedemptionService.release(
-              txWithVoucher.userVoucherId,
-              appt.id,
-            ).catch((vErr) => {
-              console.error(`[paymentMaintenance] Failed to release voucher for appointment ${appt.appointmentNo}:`, vErr.message);
-            });
+            const uv = await UserVoucher.findOne({ id: txWithVoucher.userVoucherId });
+            if (uv && uv.used && uv.appointmentId === appt.id) {
+              await voucherRedemptionService.release(
+                txWithVoucher.userVoucherId,
+                appt.id,
+              ).catch((vErr) => {
+                console.error(`[paymentMaintenance] Failed to release voucher for appointment ${appt.appointmentNo}:`, vErr.message);
+              });
+            }
           }
 
           // Audit
