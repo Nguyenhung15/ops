@@ -27,6 +27,11 @@ const userVoucherSchema = new mongoose.Schema(
       type: Date,
       default: null,
     },
+    appointmentId: {
+      type: Number,
+      default: null,
+      index: true,
+    },
   },
   {
     timestamps: true,
