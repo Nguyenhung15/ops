@@ -66,3 +66,10 @@
 | `VNP_IPN_URL` | String | `http://localhost:3000/api/payments/vnpay-ipn` | Đường dẫn IPN chuẩn xác khớp với router backend |
 | `AUDIT_ACTIONS` mới | Enum | - | `PAYMENT_STATE_SYNC_FAILED`, `PAYMENT_RECONCILED`, `APPOINTMENT_PAYMENT_EXPIRED` |
 | `needsReconcile` | Boolean | `false` | Trường mới đánh chỉ mục (index) trong model `PaymentTransaction` |
+
+---
+
+### 4. Vị trí Model UserVoucher & Bổ sung trường `appointmentId` (Schema Alignment)
+- **Vị trí Model**: Tại commit `74055e1` trên `origin/main`, model `UserVoucher` đã được tách độc lập thành `backend/src/models/userVoucher.model.js`.
+- **Lý do bổ sung `appointmentId`**: Trong `userVoucherSchema` tại commit `74055e1`, trường `appointmentId` đã bị lược bỏ ngoài ý muốn so với đặc tả `docs/FIELD_MAP.md` (mục 4) và phiên bản schema trước đó trong `voucher.model.js`. Việc thiếu trường này khiến Mongoose loại bỏ `appointmentId` khi cập nhật (`UserVoucher.updateOne`), dẫn đến việc gắn lịch hẹn khi sử dụng voucher (`voucherRedemptionService.redeem`) và giải phóng hoàn voucher (`voucherRedemptionService.release`) khi hủy lịch hoặc hết hạn giữ chỗ thanh toán bị lỗi `VOUCHER_APPOINTMENT_MISMATCH`.
+- **Giải pháp**: Khai báo bổ sung trường `appointmentId: { type: Number, default: null, index: true }` vào `userVoucherSchema` trong `backend/src/models/userVoucher.model.js`, đảm bảo document `UserVoucher` lưu được ID lịch hẹn và hàm `release()` đối soát chính xác lịch hẹn tương ứng.
